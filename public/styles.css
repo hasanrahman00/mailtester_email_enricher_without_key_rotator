@@ -240,6 +240,19 @@ body {
 .stat-num.orange { color: var(--orange); }
 .stat-num.muted { color: var(--text-3); }
 
+/* Other issues clickable stat */
+.other-stat-btn {
+  font-family: var(--mono); font-size: 13px; font-weight: 500;
+  background: none; border: none; cursor: pointer; padding: 0;
+  color: var(--text-3);
+  transition: color 0.15s;
+}
+.other-stat-btn.has-issues {
+  color: #a78bfa;
+  text-decoration: underline dotted;
+}
+.other-stat-btn.has-issues:hover { color: #c4b5fd; }
+
 .empty { color: var(--text-3); text-align: center; padding: 40px 0; font-size: 14px; }
 
 /* ── Logs Drawer ── */

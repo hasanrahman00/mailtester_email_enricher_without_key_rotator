@@ -126,6 +126,7 @@ function renderJobs() {
       <td class="col-num"><span class="stat-num ${valid ? 'green' : 'muted'}">${valid}</span></td>
       <td class="col-num"><span class="stat-num ${catchAll ? 'amber' : 'muted'}">${catchAll}</span></td>
       <td class="col-num"><span class="stat-num ${notFound ? 'red' : 'muted'}">${notFound}</span></td>
+      <td class="col-num"><button class="other-stat-btn ${(mxNotFound + errors) > 0 ? 'has-issues' : 'muted'}" onclick="showIssues('${job.jobId}')" title="MX Not Found + Timeouts/Errors">${mxNotFound + errors}</button></td>
       <td class="col-num"><span class="stat-num ${rateLimited ? 'orange' : 'muted'}">${rateLimited}</span></td>
       <td><div class="action-row">
         ${isRunning ? `<button class="btn-action pause" onclick="pauseJob('${job.jobId}')">Pause</button>` : ''}
