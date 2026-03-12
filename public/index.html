@@ -97,6 +97,22 @@
       </div>
     </div>
 
+    <!-- Issues Drawer -->
+    <div id="issues-overlay" class="overlay" hidden>
+      <div class="drawer">
+        <div class="drawer-head">
+          <h3 id="issues-title">Issue Statistics</h3>
+          <button type="button" id="issues-close" class="btn btn-ghost">✕</button>
+        </div>
+        <div id="issues-content" class="issues-content">
+          <table class="issues-table">
+            <thead><tr><th>Issue Type</th><th>Count</th></tr></thead>
+            <tbody id="issues-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="./app.js"></script>
   </body>
 </html>

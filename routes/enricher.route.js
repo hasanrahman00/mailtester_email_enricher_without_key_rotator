@@ -1,6 +1,6 @@
 import express from 'express';
 import { startEnricher, uploadContactsFile, downloadJobResult } from '../controllers/enricher.controller.js';
-import { getJobStatus, listJobs, stopJob, deleteJob, fetchJobLogs } from '../controllers/job.controller.js';
+import { getJobStatus, listJobs, stopJob, pauseJob, rerunJobController, deleteJob, fetchJobLogs } from '../controllers/job.controller.js';
 import { prepareJobContext, uploadSingleFile } from '../middlewares/jobUpload.middleware.js';
 import { getKeyScheduler } from '../clients/keyManager.js';
 
@@ -12,6 +12,8 @@ router.get('/v1/scraper/enricher/download/:jobId', downloadJobResult);
 router.get('/v1/scraper/enricher/jobs', listJobs);
 router.get('/v1/scraper/enricher/jobs/:jobId', getJobStatus);
 router.post('/v1/scraper/enricher/jobs/:jobId/stop', stopJob);
+router.post('/v1/scraper/enricher/jobs/:jobId/pause', pauseJob);
+router.post('/v1/scraper/enricher/jobs/:jobId/rerun', rerunJobController);
 router.delete('/v1/scraper/enricher/jobs/:jobId', deleteJob);
 router.get('/v1/scraper/enricher/jobs/:jobId/logs', fetchJobLogs);
 

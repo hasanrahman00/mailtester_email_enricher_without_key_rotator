@@ -1,5 +1,6 @@
 const activeJobs = new Set();
 const stopSignals = new Set();
+const pauseSignals = new Set();
 const jobLogs = new Map(); // jobId -> string[]
 
 const MAX_LOG_LINES = 500;
@@ -12,6 +13,7 @@ export function markJobComplete(jobId) {
   if (jobId) {
     activeJobs.delete(jobId);
     stopSignals.delete(jobId);
+    pauseSignals.delete(jobId);
   }
 }
 
@@ -25,6 +27,14 @@ export function requestJobStop(jobId) {
 
 export function isStopRequested(jobId) {
   return stopSignals.has(jobId);
+}
+
+export function requestJobPause(jobId) {
+  if (jobId) pauseSignals.add(jobId);
+}
+
+export function isPauseRequested(jobId) {
+  return pauseSignals.has(jobId);
 }
 
 export function appendJobLog(jobId, message) {

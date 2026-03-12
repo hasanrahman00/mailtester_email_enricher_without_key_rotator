@@ -6,7 +6,7 @@ import { DELIVERY_STATUS } from './upload/status.utils.js';
 const MAX_COMBOS = 8;
 
 export async function enrichContacts(contacts, options = {}) {
-  if (!Array.isArray(contacts) || contacts.length === 0) return [];
+  if (!Array.isArray(contacts) || contacts.length === 0) return { results: [], haltType: null, unprocessedRowIds: [] };
   const { jobId } = options;
   const dualDomainRowIds = new Set(contacts.filter((c) => c.domain2).map((c) => c.rowId));
   const finalResults = new Array(contacts.length);
@@ -22,9 +22,16 @@ export async function enrichContacts(contacts, options = {}) {
     }
   };
 
-  const d1Processed = await processContactsInBatches(contacts, {
+  const d1Batch = await processContactsInBatches(contacts, {
     verifyEmail, generatePatterns, maxCombos: MAX_COMBOS, onResult: d1OnResult, jobId,
   });
+  const d1Processed = d1Batch.results;
+  const unprocessedRowIds = [...d1Batch.unprocessedRowIds];
+
+  // If halted during first pass, stop here
+  if (d1Batch.haltType) {
+    return { results: finalResults.filter(Boolean), haltType: d1Batch.haltType, haltReason: d1Batch.haltReason, unprocessedRowIds };
+  }
 
   const d2Candidates = [];
   contacts.forEach((contact, index) => {
@@ -38,7 +45,9 @@ export async function enrichContacts(contacts, options = {}) {
 
   if (d2Candidates.length > 0) {
     const d2Contacts = d2Candidates.map(({ contact }) => ({ ...contact, domain: contact.domain2 }));
-    const d2Processed = await processContactsInBatches(d2Contacts, { verifyEmail, generatePatterns, maxCombos: MAX_COMBOS, jobId });
+    const d2Batch = await processContactsInBatches(d2Contacts, { verifyEmail, generatePatterns, maxCombos: MAX_COMBOS, jobId });
+    const d2Processed = d2Batch.results;
+    unprocessedRowIds.push(...d2Batch.unprocessedRowIds);
 
     for (let i = 0; i < d2Candidates.length; i++) {
       const { originalIndex, contact, d1Result } = d2Candidates[i];
@@ -64,6 +73,11 @@ export async function enrichContacts(contacts, options = {}) {
         await options.onResult({ contact, bestEmail: merged.bestEmail, status: merged.status, details: merged.details, resultsPerCombo: merged.allCheckedCandidates || [], domainUsed: merged.domainUsed, notes: merged.notes });
       }
     }
+
+    if (d2Batch.haltType) {
+      return { results: finalResults.filter(Boolean), haltType: d2Batch.haltType, haltReason: d2Batch.haltReason, unprocessedRowIds };
+    }
   }
-  return finalResults;
+
+  return { results: finalResults, haltType: null, haltReason: null, unprocessedRowIds };
 }

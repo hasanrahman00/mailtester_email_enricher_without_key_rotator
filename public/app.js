@@ -17,6 +17,10 @@ const logsOverlay = $('#logs-overlay');
 const logsTitle = $('#logs-title');
 const logsContent = $('#logs-content');
 const logsClose = $('#logs-close');
+const issuesOverlay = $('#issues-overlay');
+const issuesTitle = $('#issues-title');
+const issuesTbody = $('#issues-tbody');
+const issuesClose = $('#issues-close');
 
 let jobs = [];
 let pollTimer = null;
@@ -26,6 +30,9 @@ let openLogJobId = null;
 // ── Icons (inline SVG) ──
 const ICONS = {
   stop: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
+  pause: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+  rerun: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>',
+  issues: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
   trash: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   download: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
   logs: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
@@ -82,8 +89,7 @@ async function loadJobs() {
     const data = await res.json();
     jobs = data.jobs || [];
     renderJobs();
-    // Start polling if any job is processing
-    if (jobs.some((j) => j.status === 'processing')) startPolling();
+    if (jobs.some((j) => j.status === 'run')) startPolling();
     else stopPolling();
   } catch (err) { /* retry next poll */ }
 }
@@ -100,13 +106,17 @@ function renderJobs() {
   tbody.innerHTML = jobs.map((job) => {
     const total = job.totals?.totalRows ?? job.progress?.totalContacts ?? 0;
     const processed = job.resultCount ?? job.progress?.processedContacts ?? 0;
-    const pct = total ? Math.round((processed / total) * 100) : (job.status === 'completed' ? 100 : 0);
+    const pct = total ? Math.round((processed / total) * 100) : (job.status === 'done' ? 100 : 0);
     const counts = job.progress?.statusCounts || {};
     const valid = counts.valid || 0;
     const catchAll = counts.catch_all || 0;
     const notFound = counts.not_found || 0;
     const rateLimited = counts.rate_limited || 0;
-    const isProcessing = job.status === 'processing';
+    const mxNotFound = counts.mx_not_found || 0;
+    const errors = counts.error || 0;
+    const issueCount = rateLimited + mxNotFound + errors;
+    const isRunning = job.status === 'run';
+    const canRerun = job.status === 'stop' || job.status === 'pause';
 
     return `<tr data-job="${job.jobId}">
       <td><div class="file-cell"><strong>${esc(job.originalFilename || 'Untitled')}</strong><span class="meta">${fmtDate(job.createdAt)}</span></div></td>
@@ -118,10 +128,13 @@ function renderJobs() {
       <td class="col-num"><span class="stat-num ${notFound ? 'red' : 'muted'}">${notFound}</span></td>
       <td class="col-num"><span class="stat-num ${rateLimited ? 'orange' : 'muted'}">${rateLimited}</span></td>
       <td><div class="action-row">
-        ${isProcessing ? `<button class="btn-icon stop" title="Stop" onclick="stopJob('${job.jobId}')">${ICONS.stop}</button>` : ''}
-        ${job.downloadUrl ? `<a class="btn-icon" title="Download" href="${job.downloadUrl}" download>${ICONS.download}</a>` : ''}
-        <button class="btn-icon" title="Logs" onclick="openLogs('${job.jobId}')">${ICONS.logs}</button>
-        <button class="btn-icon danger" title="Delete" onclick="deleteJob('${job.jobId}')">${ICONS.trash}</button>
+        ${isRunning ? `<button class="btn-action pause" onclick="pauseJob('${job.jobId}')">Pause</button>` : ''}
+        ${isRunning ? `<button class="btn-action stop" onclick="stopJob('${job.jobId}')">Stop</button>` : ''}
+        ${canRerun ? `<button class="btn-action rerun" onclick="rerunJob('${job.jobId}')">Rerun</button>` : ''}
+        ${job.downloadUrl ? `<a class="btn-action download" href="${job.downloadUrl}" download>Download</a>` : ''}
+        <button class="btn-action issues" onclick="showIssues('${job.jobId}')">Issues${issueCount > 0 ? ` <span class="issue-badge">${issueCount}</span>` : ''}</button>
+        <button class="btn-action logs" onclick="openLogs('${job.jobId}')">Logs</button>
+        <button class="btn-action danger" onclick="deleteJob('${job.jobId}')">Delete</button>
       </div></td>
     </tr>`;
   }).join('');
@@ -145,6 +158,25 @@ window.stopJob = async (jobId) => {
   } catch (err) { showBanner('error', err.message); }
 };
 
+window.pauseJob = async (jobId) => {
+  try {
+    await fetch(`/v1/scraper/enricher/jobs/${jobId}/pause`, { method: 'POST' });
+    showBanner('info', `Pausing job ${jobId}...`);
+    await loadJobs();
+  } catch (err) { showBanner('error', err.message); }
+};
+
+window.rerunJob = async (jobId) => {
+  try {
+    const res = await fetch(`/v1/scraper/enricher/jobs/${jobId}/rerun`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Rerun failed');
+    showBanner('success', `Rerun started for job ${jobId}.`);
+    await loadJobs();
+    startPolling();
+  } catch (err) { showBanner('error', err.message); }
+};
+
 window.deleteJob = async (jobId) => {
   if (!confirm('Delete this job and its output files?')) return;
   try {
@@ -153,6 +185,90 @@ window.deleteJob = async (jobId) => {
     renderJobs();
   } catch (err) { showBanner('error', err.message); }
 };
+
+// ── Issues Drawer ──
+window.showIssues = (jobId) => {
+  const job = jobs.find((j) => j.jobId === jobId);
+  if (!job) return;
+  const counts = job.progress?.statusCounts || {};
+  const total = job.progress?.totalContacts || 0;
+  issuesTitle.textContent = `Issue Statistics`;
+
+  const issueRows = [
+    { label: 'MX Record Not Found', desc: 'Domain has no MX records', key: 'mx_not_found', color: 'orange', icon: '⚡' },
+    { label: 'API / Rate Limited',  desc: 'Spam block or daily limit hit', key: 'rate_limited', color: 'amber', icon: '⏱' },
+    { label: 'Processing Errors',   desc: 'Timeout or connection failure', key: 'error', color: 'red', icon: '✕' },
+  ];
+
+  const totalIssues = issueRows.reduce((s, r) => s + (counts[r.key] || 0), 0);
+  const cleanRows = [
+    { label: 'Valid',     key: 'valid',     color: 'green' },
+    { label: 'Catch-All', key: 'catch_all', color: 'amber' },
+    { label: 'Not Found', key: 'not_found', color: 'red' },
+    { label: 'Skipped',   key: 'skipped',   color: 'muted' },
+  ];
+  const totalClean = cleanRows.reduce((s, r) => s + (counts[r.key] || 0), 0);
+
+  const pct = (n) => total > 0 ? `${Math.round((n / total) * 100)}%` : '—';
+
+  const issuesContent = $('#issues-content');
+  issuesContent.innerHTML = `
+    <div class="issues-summary">
+      <div class="issues-summary-card issues-card-bad">
+        <div class="issues-card-num">${totalIssues}</div>
+        <div class="issues-card-label">Total Issues</div>
+        <div class="issues-card-pct">${pct(totalIssues)} of contacts</div>
+      </div>
+      <div class="issues-summary-card issues-card-good">
+        <div class="issues-card-num">${totalClean}</div>
+        <div class="issues-card-label">Processed OK</div>
+        <div class="issues-card-pct">${pct(totalClean)} of contacts</div>
+      </div>
+    </div>
+
+    <div class="issues-section-title">Issue Breakdown</div>
+    <table class="issues-table">
+      <thead><tr><th>Type</th><th>Description</th><th style="text-align:right">Count</th><th style="text-align:right">% of Total</th></tr></thead>
+      <tbody>
+        ${issueRows.map(({ label, desc, key, color, icon }) => {
+          const count = counts[key] || 0;
+          return `<tr class="${count > 0 ? 'issue-row-active' : ''}">
+            <td><span class="issue-type-label ${color}">${icon} ${label}</span></td>
+            <td class="issue-desc">${desc}</td>
+            <td style="text-align:right"><span class="stat-num ${count > 0 ? color : 'muted'}">${count}</span></td>
+            <td style="text-align:right"><span class="stat-num muted">${pct(count)}</span></td>
+          </tr>`;
+        }).join('')}
+        <tr class="issues-total">
+          <td colspan="2"><strong>Total Issues</strong></td>
+          <td style="text-align:right"><strong>${totalIssues}</strong></td>
+          <td style="text-align:right"><strong>${pct(totalIssues)}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="issues-section-title" style="margin-top:20px">Results Summary</div>
+    <table class="issues-table">
+      <thead><tr><th>Status</th><th style="text-align:right">Count</th><th style="text-align:right">% of Total</th></tr></thead>
+      <tbody>
+        ${cleanRows.map(({ label, key, color }) => {
+          const count = counts[key] || 0;
+          return `<tr>
+            <td><span class="stat-num ${count > 0 ? color : 'muted'}">${label}</span></td>
+            <td style="text-align:right"><span class="stat-num ${count > 0 ? color : 'muted'}">${count}</span></td>
+            <td style="text-align:right"><span class="stat-num muted">${pct(count)}</span></td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+    <div class="issues-job-meta">Job: <span>${esc(job.originalFilename || jobId)}</span> &nbsp;·&nbsp; Total Contacts: <span>${total}</span></div>
+  `;
+
+  issuesOverlay.hidden = false;
+};
+
+issuesClose?.addEventListener('click', () => { issuesOverlay.hidden = true; });
+issuesOverlay?.addEventListener('click', (e) => { if (e.target === issuesOverlay) issuesOverlay.hidden = true; });
 
 // ── Logs Drawer ──
 window.openLogs = (jobId) => {
@@ -217,7 +333,7 @@ function fmtDate(val) {
 }
 
 function fmtStatus(s) {
-  return { completed: 'Done', processing: 'Running', failed: 'Failed', stopped: 'Stopped' }[s] || 'Pending';
+  return { run: 'Running', done: 'Done', stop: 'Stopped', pause: 'Paused', failed: 'Failed' }[s] || 'Pending';
 }
 
 // ── Refresh ──

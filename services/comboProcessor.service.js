@@ -1,7 +1,7 @@
 import { config } from '../config/env.js';
 import { DELIVERY_STATUS } from './upload/status.utils.js';
 import { DailyLimitExhaustedError } from '../clients/mailtester.client.js';
-import { isStopRequested, appendJobLog } from './jobState.service.js';
+import { isStopRequested, isPauseRequested, appendJobLog } from './jobState.service.js';
 
 const MAX_COMBOS_DEFAULT = 8;
 const MAX_RATE_LIMIT_RETRIES_PER_COMBO = 2;
@@ -44,6 +44,7 @@ export async function processContactsInBatches(contacts, {
   let inFlight = 0;
   let halted = false;
   let haltReason = '';
+  let haltType = ''; // 'stop' | 'pause' | 'spam' | 'limit'
 
   await new Promise((resolveAll) => {
     function pickNextPending() {
@@ -52,8 +53,19 @@ export async function processContactsInBatches(contacts, {
       if (jobId && isStopRequested(jobId)) {
         if (!halted) {
           halted = true;
+          haltType = 'stop';
           haltReason = 'Job stopped by user';
           log('STOP signal received — halting pool');
+        }
+        return null;
+      }
+      // Check pause signal
+      if (jobId && isPauseRequested(jobId)) {
+        if (!halted) {
+          halted = true;
+          haltType = 'pause';
+          haltReason = 'Job paused by user';
+          log('PAUSE signal received — halting pool');
         }
         return null;
       }
@@ -84,11 +96,20 @@ export async function processContactsInBatches(contacts, {
 
     async function processOneState(state) {
       try {
-        await advanceState(state, verifyEmail, maxCombos, onResult, log);
+        await advanceState(state, verifyEmail, maxCombos, onResult, log, () => {
+          // Called when this contact triggers a spam block halt
+          if (!halted) {
+            halted = true;
+            haltType = 'spam';
+            haltReason = 'SPAM block persisted after all retries — job halted';
+            log(`SPAM BLOCK — halting entire job`);
+          }
+        });
       } catch (err) {
         if (err instanceof DailyLimitExhaustedError) {
           if (!halted) {
             halted = true;
+            haltType = 'limit';
             haltReason = err.message;
             log(`DAILY LIMIT REACHED — ${err.message}`);
           }
@@ -100,16 +121,27 @@ export async function processContactsInBatches(contacts, {
     else tryLaunch();
   });
 
+  // Collect unprocessed rowIds (contacts not done when halted)
+  const unprocessedRowIds = [];
+
   // Finalize remaining
   for (const state of states) {
     if (!state.done) {
       if (halted) {
-        state.bestEmail = null;
-        // Use RATE_LIMITED, not NOT_FOUND — so the CSV shows the real reason
-        state.status = haltReason.includes('stopped') ? DELIVERY_STATUS.NOT_FOUND : DELIVERY_STATUS.RATE_LIMITED;
-        state.details = { reason: haltReason };
-        state.done = true;
-        if (onResult) await onResult(buildResultPayload(state));
+        // For stop/pause: do NOT update CSV — just track as unprocessed
+        if (haltType === 'stop' || haltType === 'pause') {
+          state.done = true;
+          const rowId = state.contact?.rowId;
+          if (typeof rowId === 'number') unprocessedRowIds.push(rowId);
+          // No onResult call — CSV stays empty for this row
+        } else {
+          // Daily limit or spam halt: mark rate_limited and notify
+          state.bestEmail = null;
+          state.status = DELIVERY_STATUS.RATE_LIMITED;
+          state.details = { reason: haltReason };
+          state.done = true;
+          if (onResult) await onResult(buildResultPayload(state));
+        }
       } else {
         await finalizeState(state, onResult, log);
       }
@@ -119,16 +151,21 @@ export async function processContactsInBatches(contacts, {
   const doneCount = states.filter((s) => s.done).length;
   log(`Completed: ${doneCount}/${states.length} contacts`);
 
-  return states.map((state) => ({
-    contact: state.contact,
-    bestEmail: state.bestEmail,
-    status: state.status,
-    details: state.details,
-    resultsPerCombo: state.resultsPerCombo,
-  }));
+  return {
+    results: states.map((state) => ({
+      contact: state.contact,
+      bestEmail: state.bestEmail,
+      status: state.status,
+      details: state.details,
+      resultsPerCombo: state.resultsPerCombo,
+    })),
+    haltType,
+    haltReason,
+    unprocessedRowIds,
+  };
 }
 
-async function advanceState(state, verifyEmail, maxCombos, notify, log) {
+async function advanceState(state, verifyEmail, maxCombos, notify, log, onSpamHalt) {
   if (state.done) return;
   if (state.currentComboIndex >= maxCombos || state.currentComboIndex >= state.patterns.length) {
     await finalizeState(state, notify, log);
@@ -153,7 +190,8 @@ async function advanceState(state, verifyEmail, maxCombos, notify, log) {
       await sleep(pauseMs);
       return;
     }
-    log(`Rate-limit retries exhausted for ${email}, marking as rate_limited`);
+    // Retries exhausted — halt the entire job
+    log(`Rate-limit retries exhausted for ${email} — halting job`);
     state.rateLimitRetries = 0;
     state.bestEmail = null;
     state.status = DELIVERY_STATUS.RATE_LIMITED;
@@ -161,6 +199,7 @@ async function advanceState(state, verifyEmail, maxCombos, notify, log) {
     state.done = true;
     state.resultsPerCombo.push({ email, code: result?.code ?? null, message: 'SPAM Block', error: 'Rate limit' });
     if (notify) await notify(buildResultPayload(state));
+    if (onSpamHalt) onSpamHalt();
     return;
   }
 
@@ -174,7 +213,7 @@ async function advanceState(state, verifyEmail, maxCombos, notify, log) {
 
   if (isMissingMxRecords(result)) {
     state.bestEmail = null;
-    state.status = DELIVERY_STATUS.NOT_FOUND;
+    state.status = DELIVERY_STATUS.MX_NOT_FOUND;
     state.details = { reason: 'Domain missing MX records' };
     state.done = true;
     log(`${email} → No MX`);
@@ -183,7 +222,7 @@ async function advanceState(state, verifyEmail, maxCombos, notify, log) {
   }
   if (isTimeout(result)) {
     state.bestEmail = null;
-    state.status = DELIVERY_STATUS.NOT_FOUND;
+    state.status = DELIVERY_STATUS.ERROR;
     state.details = { reason: 'Domain lookup timed out' };
     state.done = true;
     log(`${email} → Timeout`);

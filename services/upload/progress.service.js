@@ -9,6 +9,8 @@ export function createProgressSnapshot(totalContacts, skippedRows) {
       [DELIVERY_STATUS.CATCH_ALL]: 0,
       [DELIVERY_STATUS.NOT_FOUND]: 0,
       [DELIVERY_STATUS.RATE_LIMITED]: 0,
+      [DELIVERY_STATUS.MX_NOT_FOUND]: 0,
+      [DELIVERY_STATUS.ERROR]: 0,
       skipped: skippedRows,
     },
   };

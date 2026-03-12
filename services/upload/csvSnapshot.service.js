@@ -42,6 +42,44 @@ export function buildCsvColumnOrder(headers = [], columnMap = null) {
   return [...withoutAppendColumns, ...CSV_APPEND_COLUMNS];
 }
 
+export async function loadExistingCsvRows(filePath, columns) {
+  try {
+    const content = await fs.readFile(filePath, 'utf-8');
+    const lines = content.split('\n').filter((l) => l.trim());
+    if (lines.length < 2) return null;
+    const headers = lines[0].split(',').map((h) => h.replace(/^"|"$/g, '').replace(/""/g, '"'));
+    const rows = lines.slice(1).map((line) => {
+      const values = parseCsvLine(line);
+      const row = {};
+      headers.forEach((h, i) => { row[h] = values[i] ?? ''; });
+      return row;
+    });
+    return rows;
+  } catch {
+    return null;
+  }
+}
+
+function parseCsvLine(line) {
+  const values = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { cur += ch; }
+    } else {
+      if (ch === '"') { inQuotes = true; }
+      else if (ch === ',') { values.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+  }
+  values.push(cur);
+  return values;
+}
+
 export function createCsvSnapshotWriter(filePath, columns, initialRows) {
   let rows = initialRows.slice();
   let writeQueue = Promise.resolve();
