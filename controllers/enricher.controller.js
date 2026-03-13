@@ -3,6 +3,7 @@ import path from 'path';
 import { enrichContacts } from '../services/enricher.service.js';
 import { processUploadedFile } from '../services/uploadProcessor.service.js';
 import { getTempRootDir, readMetadata } from '../utils/storage.js';
+import { validateExtension } from '../services/upload/fileValidation.service.js';
 
 /**
  * Controller to handle POST /v1/scraper/enricher/start requests.
@@ -30,43 +31,37 @@ export async function uploadContactsFile(req, res) {
     return res.status(500).json({ error: 'Upload context missing job metadata.' });
   }
 
+  // Validate file extension before responding — instant, no I/O.
+  try {
+    validateExtension(req.file.originalname);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+
   const userId = req.headers['x-user-id'] || req.body?.userId || 'anonymous';
   const jobId = req.jobContext.jobId;
   const downloadUrl = `/v1/scraper/enricher/download/${jobId}`;
-  let responded = false;
 
+  // Respond immediately — UI shows the job row instantly.
+  res.status(202).json({
+    jobId,
+    status: 'processing',
+    totals: null,
+    progress: null,
+    downloadUrl,
+  });
+
+  // Parsing + enrichment runs in background.
+  // Heavy validations (row limit, missing columns) write status: 'failed'
+  // to metadata — UI picks that up via polling.
   processUploadedFile({
     jobId,
     jobDir: req.jobContext.jobDir,
     file: req.file,
     userId,
-    onReady: async ({ metadata }) => {
-      if (responded) {
-        return;
-      }
-      responded = true;
-      res.status(202).json({
-        jobId,
-        status: metadata.status || 'processing',
-        totals: metadata.totals || null,
-        progress: metadata.progress || null,
-        downloadUrl,
-      });
-    },
-  })
-    .then((payload) => {
-      if (!responded) {
-        responded = true;
-        res.json(payload);
-      }
-    })
-    .catch((error) => {
-      console.error('Upload processing error:', error);
-      if (!responded) {
-        responded = true;
-        res.status(400).json({ error: error.message });
-      }
-    });
+  }).catch((error) => {
+    console.error(`Upload processing error for ${jobId}:`, error.message);
+  });
 }
 
 export async function downloadJobResult(req, res) {
