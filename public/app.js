@@ -26,6 +26,8 @@ let jobs = [];
 let pollTimer = null;
 let logsPollTimer = null;
 let openLogJobId = null;
+let pollGraceCount = 0;         // consecutive polls with no running jobs
+const POLL_GRACE_CYCLES = 3;    // keep polling this many extra cycles after last "run"
 
 // ── Icons (inline SVG) ──
 const ICONS = {
@@ -72,6 +74,7 @@ if (form) form.addEventListener('submit', async (e) => {
     if (!res.ok) throw new Error(data.error || 'Upload failed');
     showBanner('success', `Job ${data.jobId} started.`);
     await loadJobs();
+    pollGraceCount = 0;
     startPolling();
   } catch (err) {
     showBanner('error', err.message);
@@ -87,10 +90,36 @@ async function loadJobs() {
     const res = await fetch('/v1/scraper/enricher/jobs');
     if (!res.ok) return;
     const data = await res.json();
-    jobs = data.jobs || [];
+    const serverJobs = data.jobs || [];
+
+    // Merge: build a map from server data, then layer in any locally-known
+    // running jobs that the server might have transiently missed.
+    const serverMap = new Map(serverJobs.map((j) => [j.jobId, j]));
+    const merged = [...serverJobs];
+
+    for (const local of jobs) {
+      if (!serverMap.has(local.jobId) && local.status === 'run') {
+        // Server didn't return this running job (transient read failure).
+        // Keep it visible so the UI doesn't flicker.
+        merged.push(local);
+      }
+    }
+
+    jobs = merged;
     renderJobs();
-    if (jobs.some((j) => j.status === 'run')) startPolling();
-    else stopPolling();
+
+    const hasRunning = jobs.some((j) => j.status === 'run');
+    if (hasRunning) {
+      pollGraceCount = 0;
+      startPolling();
+    } else {
+      pollGraceCount += 1;
+      if (pollGraceCount >= POLL_GRACE_CYCLES) {
+        stopPolling();
+      } else {
+        startPolling();   // keep polling through the grace window
+      }
+    }
   } catch (err) { /* retry next poll */ }
 }
 
@@ -174,6 +203,7 @@ window.rerunJob = async (jobId) => {
     if (!res.ok) throw new Error(data.error || 'Rerun failed');
     showBanner('success', `Rerun started for job ${jobId}.`);
     await loadJobs();
+    pollGraceCount = 0;
     startPolling();
   } catch (err) { showBanner('error', err.message); }
 };

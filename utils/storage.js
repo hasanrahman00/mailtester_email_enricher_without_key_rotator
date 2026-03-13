@@ -21,7 +21,9 @@ export async function createJobDirectory(jobId) {
 
 export async function writeMetadata(jobDir, metadata) {
   const metadataPath = path.join(jobDir, 'metadata.json');
-  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf-8');
+  const tmpPath = metadataPath + '.tmp';
+  await fs.writeFile(tmpPath, JSON.stringify(metadata, null, 2), 'utf-8');
+  await fs.rename(tmpPath, metadataPath);   // atomic on same filesystem
   return metadataPath;
 }
 

@@ -23,26 +23,53 @@ export async function listJobs(req, res) {
       jobDirs.map((dir) => readMetadata(dir)),
     );
     const activeIds = getActiveJobIds();
+
+    // Build a Set of jobIds we successfully read from disk
+    const seenJobIds = new Set();
+
     const jobs = metadataEntries
       .filter(Boolean)
-      .map((meta) => ({
-        jobId: meta.jobId,
-        userId: meta.userId,
-        originalFilename: meta.originalFilename,
-        status: activeIds.has(meta.jobId) ? "run" : meta.status || "run",
-        createdAt: meta.createdAt,
-        completedAt: meta.completedAt || null,
-        totals: meta.totals || null,
-        progress: meta.progress || null,
-        downloadUrl: meta.downloadUrl || null,
-        resultCount:
-          typeof meta.resultCount === "number"
-            ? meta.resultCount
-            : meta.progress?.processedContacts || 0,
-      }))
-      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-      .slice(0, limit);
-    return res.json({ jobs });
+      .map((meta) => {
+        seenJobIds.add(meta.jobId);
+        return {
+          jobId: meta.jobId,
+          userId: meta.userId,
+          originalFilename: meta.originalFilename,
+          status: activeIds.has(meta.jobId) ? "run" : meta.status || "run",
+          createdAt: meta.createdAt,
+          completedAt: meta.completedAt || null,
+          totals: meta.totals || null,
+          progress: meta.progress || null,
+          downloadUrl: meta.downloadUrl || null,
+          resultCount:
+            typeof meta.resultCount === "number"
+              ? meta.resultCount
+              : meta.progress?.processedContacts || 0,
+        };
+      });
+
+    // Safety net: if an in-memory active job's metadata read failed
+    // (e.g. mid-write race), inject a minimal placeholder so the UI
+    // never loses sight of a running job.
+    for (const activeId of activeIds) {
+      if (!seenJobIds.has(activeId)) {
+        jobs.push({
+          jobId: activeId,
+          userId: null,
+          originalFilename: 'Processing…',
+          status: 'run',
+          createdAt: new Date().toISOString(),
+          completedAt: null,
+          totals: null,
+          progress: null,
+          downloadUrl: null,
+          resultCount: 0,
+        });
+      }
+    }
+
+    jobs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    return res.json({ jobs: jobs.slice(0, limit) });
   } catch (error) {
     return res.status(500).json({ error: "Unable to load jobs" });
   }
