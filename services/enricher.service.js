@@ -5,79 +5,157 @@ import { DELIVERY_STATUS } from './upload/status.utils.js';
 
 const MAX_COMBOS = 8;
 
+/**
+ * Serial two-pass enrichment:
+ *
+ *   Pass 1 — ALL contacts against Website (domain).
+ *            Every result fires onResult immediately — no suppression.
+ *
+ *   Pass 2 — Contacts with Website_one that were NOT valid on Website.
+ *            Overwrite rules:
+ *              A) D2 valid         → always overwrite
+ *              B) D1 empty domain  → overwrite with any D2 result
+ *              C) otherwise        → silent, D1 stays
+ */
 export async function enrichContacts(contacts, options = {}) {
-  if (!Array.isArray(contacts) || contacts.length === 0) return { results: [], haltType: null, unprocessedRowIds: [] };
+  if (!Array.isArray(contacts) || contacts.length === 0) {
+    return { results: [], haltType: null, unprocessedRowIds: [] };
+  }
   const { jobId } = options;
-  const dualDomainRowIds = new Set(contacts.filter((c) => c.domain2).map((c) => c.rowId));
-  const finalResults = new Array(contacts.length);
 
-  const d1OnResult = async (result) => {
-    const rowId = result?.contact?.rowId;
-    if (dualDomainRowIds.has(rowId)) {
-      if (result.status === DELIVERY_STATUS.VALID && options.onResult) {
+  // ── Pass 1: ALL contacts against Website ──
+
+  const d1OnResult = options.onResult
+    ? async (result) => {
         await options.onResult({ ...result, domainUsed: 'Website', notes: '' });
       }
-    } else if (options.onResult) {
-      await options.onResult({ ...result, domainUsed: 'Website', notes: '' });
-    }
-  };
+    : undefined;
 
   const d1Batch = await processContactsInBatches(contacts, {
-    verifyEmail, generatePatterns, maxCombos: MAX_COMBOS, onResult: d1OnResult, jobId,
+    verifyEmail,
+    generatePatterns,
+    maxCombos: MAX_COMBOS,
+    onResult: d1OnResult,
+    jobId,
   });
-  const d1Processed = d1Batch.results;
+
+  const d1Results = d1Batch.results;
   const unprocessedRowIds = [...d1Batch.unprocessedRowIds];
 
-  // If halted during first pass, stop here
   if (d1Batch.haltType) {
-    return { results: finalResults.filter(Boolean), haltType: d1Batch.haltType, haltReason: d1Batch.haltReason, unprocessedRowIds };
+    return {
+      results: d1Results,
+      haltType: d1Batch.haltType,
+      haltReason: d1Batch.haltReason,
+      unprocessedRowIds,
+    };
   }
+
+  // ── Filter for Pass 2: has domain2 AND D1 was NOT valid ──
 
   const d2Candidates = [];
   contacts.forEach((contact, index) => {
-    const d1 = d1Processed[index];
-    if (!contact.domain2 || d1.status === DELIVERY_STATUS.VALID) {
-      finalResults[index] = { firstName: d1.contact.firstName, lastName: d1.contact.lastName, domain: d1.contact.domain, bestEmail: d1.bestEmail, status: d1.status, details: d1.details, allCheckedCandidates: d1.resultsPerCombo, domainUsed: 'Website', notes: '' };
-    } else {
-      d2Candidates.push({ originalIndex: index, contact, d1Result: d1 });
+    if (contact.domain2 && d1Results[index].status !== DELIVERY_STATUS.VALID) {
+      d2Candidates.push({
+        originalIndex: index,
+        contact,
+        d1Result: d1Results[index],
+      });
     }
   });
 
-  if (d2Candidates.length > 0) {
-    const d2Contacts = d2Candidates.map(({ contact }) => ({ ...contact, domain: contact.domain2 }));
-    const d2Batch = await processContactsInBatches(d2Contacts, { verifyEmail, generatePatterns, maxCombos: MAX_COMBOS, jobId });
-    const d2Processed = d2Batch.results;
-    unprocessedRowIds.push(...d2Batch.unprocessedRowIds);
-
-    for (let i = 0; i < d2Candidates.length; i++) {
-      const { originalIndex, contact, d1Result } = d2Candidates[i];
-      const d2 = d2Processed[i];
-      const base = { firstName: contact.firstName, lastName: contact.lastName, domain: contact.domain };
-      const combos = [...(d1Result.resultsPerCombo || []), ...(d2?.resultsPerCombo || [])];
-      let merged;
-
-      if (d1Result.status === DELIVERY_STATUS.CATCH_ALL && d2?.status === DELIVERY_STATUS.VALID) {
-        merged = { ...base, bestEmail: d2.bestEmail, status: DELIVERY_STATUS.VALID, details: d2.details, allCheckedCandidates: combos, domainUsed: 'Website_one', notes: 'Valid on second domain' };
-      } else if (d1Result.status === DELIVERY_STATUS.CATCH_ALL) {
-        merged = { ...base, bestEmail: d1Result.bestEmail, status: DELIVERY_STATUS.CATCH_ALL, details: { reason: 'Primary catch-all' }, allCheckedCandidates: combos, domainUsed: 'Website', notes: 'Catch-all primary' };
-      } else if (d2?.status === DELIVERY_STATUS.VALID) {
-        merged = { ...base, bestEmail: d2.bestEmail, status: DELIVERY_STATUS.VALID, details: d2.details, allCheckedCandidates: combos, domainUsed: 'Website_one', notes: 'Valid on second domain' };
-      } else if (d2?.status === DELIVERY_STATUS.CATCH_ALL) {
-        merged = { ...base, bestEmail: d2.bestEmail, status: DELIVERY_STATUS.CATCH_ALL, details: d2.details, allCheckedCandidates: combos, domainUsed: 'Website_one', notes: 'D2 catch-all' };
-      } else {
-        merged = { ...base, bestEmail: null, status: DELIVERY_STATUS.NOT_FOUND, details: { reason: 'Both domains exhausted' }, allCheckedCandidates: combos, domainUsed: '', notes: '' };
-      }
-
-      finalResults[originalIndex] = merged;
-      if (options.onResult) {
-        await options.onResult({ contact, bestEmail: merged.bestEmail, status: merged.status, details: merged.details, resultsPerCombo: merged.allCheckedCandidates || [], domainUsed: merged.domainUsed, notes: merged.notes });
-      }
-    }
-
-    if (d2Batch.haltType) {
-      return { results: finalResults.filter(Boolean), haltType: d2Batch.haltType, haltReason: d2Batch.haltReason, unprocessedRowIds };
-    }
+  if (d2Candidates.length === 0) {
+    return {
+      results: d1Results,
+      haltType: null,
+      haltReason: null,
+      unprocessedRowIds,
+    };
   }
 
-  return { results: finalResults, haltType: null, haltReason: null, unprocessedRowIds };
+  // ── Pass 2: non-valid contacts against Website_one ──
+
+  const d2Contacts = d2Candidates.map(({ contact }) => ({
+    ...contact,
+    domain: contact.domain2,
+  }));
+
+  // Track each contact's original domain and D1 status for the overwrite gate
+  const d1InfoByRowId = new Map(
+    d2Candidates.map(({ contact, d1Result }) => [
+      contact.rowId,
+      { originalDomain: contact.domain, d1Status: d1Result.status },
+    ]),
+  );
+
+  const d2OnResult = options.onResult
+    ? async (result) => {
+        const rowId = result?.contact?.rowId;
+        const info = d1InfoByRowId.get(rowId);
+        if (!info) return;
+
+        const d1HadEmptyDomain = !info.originalDomain;
+        const d2IsValid = result.status === DELIVERY_STATUS.VALID;
+
+        if (d2IsValid || d1HadEmptyDomain) {
+          const notes = d2IsValid
+            ? 'Valid on second domain'
+            : 'Fallback to second domain';
+
+          await options.onResult({
+            ...result,
+            domainUsed: 'Website_one',
+            notes,
+            _replaces: info.d1Status,
+          });
+        }
+        // else: D1 had real domain AND D2 not valid → silent, D1 stays
+      }
+    : undefined;
+
+  const d2Batch = await processContactsInBatches(d2Contacts, {
+    verifyEmail,
+    generatePatterns,
+    maxCombos: MAX_COMBOS,
+    onResult: d2OnResult,
+    jobId,
+  });
+
+  unprocessedRowIds.push(...d2Batch.unprocessedRowIds);
+
+  // ── Build final results: apply same overwrite logic ──
+
+  const finalResults = d1Results.map((r) => ({ ...r }));
+
+  d2Candidates.forEach(({ originalIndex, contact, d1Result }, i) => {
+    const d2 = d2Batch.results[i];
+    if (!d2) return;
+
+    const d1HadEmptyDomain = !contact.domain;
+    const d2IsValid = d2.status === DELIVERY_STATUS.VALID;
+
+    if (d2IsValid || d1HadEmptyDomain) {
+      finalResults[originalIndex] = {
+        contact: d2.contact,
+        bestEmail: d2.bestEmail,
+        status: d2.status,
+        details: d2.details,
+        resultsPerCombo: [
+          ...(d1Result.resultsPerCombo || []),
+          ...(d2.resultsPerCombo || []),
+        ],
+        domainUsed: 'Website_one',
+        notes: d2IsValid
+          ? 'Valid on second domain'
+          : 'Fallback to second domain',
+      };
+    }
+  });
+
+  return {
+    results: finalResults,
+    haltType: d2Batch.haltType || null,
+    haltReason: d2Batch.haltReason || null,
+    unprocessedRowIds,
+  };
 }

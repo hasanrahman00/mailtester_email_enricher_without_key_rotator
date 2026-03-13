@@ -70,8 +70,13 @@ export async function processUploadedFile({ jobId, jobDir, file, userId, onReady
 
     const rowLookup = new Map(normalizedRows.map((row) => [row.rowId, row]));
 
-    const updateProgress = async (status) => {
-      progress.processedContacts += 1;
+    const updateProgress = async (status, replaces) => {
+      if (replaces) {
+        const oldBucket = normalizeStatusBucket(replaces);
+        progress.statusCounts[oldBucket] = Math.max(0, (progress.statusCounts[oldBucket] || 0) - 1);
+      } else {
+        progress.processedContacts += 1;
+      }
       const bucket = normalizeStatusBucket(status);
       progress.statusCounts[bucket] = (progress.statusCounts[bucket] || 0) + 1;
       metadataSnapshot = { ...metadataSnapshot, progress: { ...progress }, resultCount: progress.processedContacts, lastUpdate: new Date().toISOString() };
@@ -99,7 +104,7 @@ export async function processUploadedFile({ jobId, jobDir, file, userId, onReady
           jobId,
           onResult: async (result) => {
             await updateCsvRowWithResult(result);
-            await updateProgress(result.status);
+            await updateProgress(result.status, result._replaces);
           },
         })
       : { results: [], haltType: null, unprocessedRowIds: [] };
@@ -210,8 +215,13 @@ export async function rerunJob({ jobId, jobDir }) {
     const progress = metadata.progress || createProgressSnapshot(runnableRows.length, 0);
     const rowLookup = new Map(normalizedRows.map((row) => [row.rowId, row]));
 
-    const updateProgress = async (status) => {
-      progress.processedContacts += 1;
+    const updateProgress = async (status, replaces) => {
+      if (replaces) {
+        const oldBucket = normalizeStatusBucket(replaces);
+        progress.statusCounts[oldBucket] = Math.max(0, (progress.statusCounts[oldBucket] || 0) - 1);
+      } else {
+        progress.processedContacts += 1;
+      }
       const bucket = normalizeStatusBucket(status);
       progress.statusCounts[bucket] = (progress.statusCounts[bucket] || 0) + 1;
       metadataSnapshot = { ...metadataSnapshot, progress: { ...progress }, resultCount: progress.processedContacts, lastUpdate: new Date().toISOString() };
@@ -239,7 +249,7 @@ export async function rerunJob({ jobId, jobDir }) {
           jobId,
           onResult: async (result) => {
             await updateCsvRowWithResult(result);
-            await updateProgress(result.status);
+            await updateProgress(result.status, result._replaces);
           },
         })
       : { results: [], haltType: null, unprocessedRowIds: [] };
