@@ -130,6 +130,18 @@ export async function processUploadedFile({ jobId, jobDir, file, userId, onReady
       };
       await writeMetadata(jobDir, completionMetadata);
       log(`Job paused: ${apiResults.length} results, ${unprocessedRowIds.length} unprocessed`);
+    } else if (haltType === 'spam' || haltType === 'limit') {
+      const completionMetadata = {
+        ...metadataSnapshot,
+        status: 'pause',
+        haltType,
+        haltReason: enrichmentBatch.haltReason || haltType,
+        pausedAt: new Date().toISOString(),
+        unprocessedRowIds,
+        resultCount: apiResults.length,
+      };
+      await writeMetadata(jobDir, completionMetadata);
+      log(`Job halted (${haltType}): ${apiResults.length} results, ${unprocessedRowIds.length} unprocessed — rerun available`);
     } else {
       const completionMetadata = { ...metadataSnapshot, status: 'done', completedAt: new Date().toISOString(), resultCount: apiResults.length };
       await writeMetadata(jobDir, completionMetadata);
@@ -244,6 +256,9 @@ export async function rerunJob({ jobId, jobDir }) {
     } else if (haltType === 'pause') {
       await writeMetadata(jobDir, { ...metadataSnapshot, status: 'pause', pausedAt: new Date().toISOString(), unprocessedRowIds: newUnprocessedRowIds, resultCount: apiResults.length });
       log(`Rerun paused: ${newUnprocessedRowIds.length} still unprocessed`);
+    } else if (haltType === 'spam' || haltType === 'limit') {
+      await writeMetadata(jobDir, { ...metadataSnapshot, status: 'pause', haltType, haltReason: enrichmentBatch.haltReason || haltType, pausedAt: new Date().toISOString(), unprocessedRowIds: newUnprocessedRowIds, resultCount: apiResults.length });
+      log(`Rerun halted (${haltType}): ${newUnprocessedRowIds.length} still unprocessed — rerun available`);
     } else {
       await writeMetadata(jobDir, { ...metadataSnapshot, status: 'done', completedAt: new Date().toISOString(), resultCount: apiResults.length });
       log(`Rerun completed: ${apiResults.length} results`);

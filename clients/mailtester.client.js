@@ -12,25 +12,26 @@ function sleep(ms) {
 //   "Accepted" | "Limited" | "Rejected" | "Catch-All" |
 //   "No Mx" | "Mx Error" | "Timeout" | "SPAM Block"
 //
-// "SPAM Block" and "Limited" mean: you're sending too fast, slow down.
-// These come back as HTTP 200 with code "ko" — they look like rejections
-// but they're actually "try again later" signals.
+// "SPAM Block" and "Limited" mean: target mail server refused the probe.
+// These come back as HTTP 200 with code "ko".
 const RATE_LIMIT_PATTERNS = /spam.block|limited/i;
 
-// Retry config for SPAM Block responses.
-// Each retry: pause 30–60s (random), acquire a fresh key, try the SAME email.
-const MAX_RATE_LIMIT_RETRIES = 3;
-const RATE_LIMIT_MIN_PAUSE_MS = 30_000;  // 30s
-const RATE_LIMIT_MAX_PAUSE_MS = 60_000;  // 60s
-
-function randomPause() {
-  return RATE_LIMIT_MIN_PAUSE_MS + Math.floor(Math.random() * (RATE_LIMIT_MAX_PAUSE_MS - RATE_LIMIT_MIN_PAUSE_MS));
-}
+// ── Retry config (wave-compatible) ──
+//
+// OLD: 3 retries × 30-60s sleep = up to 3 min wasted per email.
+//      Then comboProcessor retried 2× more = 12 total attempts, ~8 min.
+//      One worker blocked for 8 min while others kept hammering same domain.
+//
+// NEW: 1 quick retry with 5s pause. If still blocked, return _rateLimited
+//      immediately. The wave barrier gives the domain natural rest
+//      (entire wave duration = minutes) before next attempt.
+//
+// The wave barrier is the retry mechanism, not the client.
+const MAX_RATE_LIMIT_RETRIES = 1;
+const RATE_LIMIT_PAUSE_MS = 5_000;   // 5 seconds
 
 /**
  * Custom error for daily API key exhaustion.
- * comboProcessor catches this to PAUSE the job instead of
- * marking remaining contacts as NOT_FOUND.
  */
 export class DailyLimitExhaustedError extends Error {
   constructor(message) {
@@ -51,29 +52,15 @@ function isRateLimitResponse(data) {
 /**
  * Verifies an email address using MailTester Ninja.
  *
- * ── What changed from the old version ──
- *
- * OLD: SPAM Block response → code "ko" → no pattern matched →
- *      combo index advanced → all 8 combos wasted → NOT_FOUND.
- *
- * OLD: acquireKey() throws "exhausted" → catch returns {code:null} →
- *      all 22 slots fail instantly → entire job marked NOT_FOUND.
- *
- * NEW: SPAM Block → retry 3× with 30-60s random pause using fresh keys.
- *      If still blocked, return with _rateLimited marker so
- *      comboProcessor does NOT advance the combo.
- *
- * NEW: Daily exhaustion → throw DailyLimitExhaustedError →
- *      comboProcessor pauses the job, doesn't burn contacts.
+ * SPAM Block → 1 quick retry (5s) → still blocked? → return _rateLimited
+ * The wave barrier handles the real retry with natural domain rest.
  */
 export async function verifyEmail(email) {
   for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
-    // ── Acquire a key ──
     let key;
     try {
       key = await acquireKey();
     } catch (err) {
-      // Daily cap reached — throw special error so the job pauses.
       if (err.message && err.message.includes('exhausted')) {
         throw new DailyLimitExhaustedError(err.message);
       }
@@ -92,15 +79,13 @@ export async function verifyEmail(email) {
       // ── Rate-limit detection ──
       if (isRateLimitResponse(data)) {
         if (attempt < MAX_RATE_LIMIT_RETRIES) {
-          const pauseMs = randomPause();
-          console.warn(`[MailTester] Rate-limited (${data.message}), retry ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES} in ${Math.round(pauseMs / 1000)}s`, { email });
-          await sleep(pauseMs);
-          continue;  // Retry same email with a new key
+          console.warn(`[MailTester] Rate-limited (${data.message}), quick retry in ${RATE_LIMIT_PAUSE_MS / 1000}s`, { email });
+          await sleep(RATE_LIMIT_PAUSE_MS);
+          continue;
         }
 
-        // All retries failed — return with marker so comboProcessor
-        // does NOT waste the combo.
-        console.error('[MailTester] Rate-limit persists after retries', { email, message: data.message });
+        // Still blocked — return immediately, let wave barrier handle rest
+        console.warn(`[MailTester] Rate-limited (${data.message}), returning to wave processor`, { email });
         return {
           email,
           code: data.code || null,

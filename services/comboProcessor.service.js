@@ -3,18 +3,34 @@ import { DELIVERY_STATUS } from './upload/status.utils.js';
 import { DailyLimitExhaustedError } from '../clients/mailtester.client.js';
 import { isStopRequested, isPauseRequested, appendJobLog } from './jobState.service.js';
 
+/**
+ * ── Wave-Based (Barrier) Combo Processor ──
+ *
+ * Processes contacts using STRICT WAVE BARRIERS:
+ *
+ *   Wave 0: combo[0] for ALL contacts  → BARRIER → drop done contacts
+ *   Wave 1: combo[1] for remaining     → BARRIER → drop done contacts
+ *   Wave 2: combo[2] for remaining     → BARRIER → drop done contacts
+ *   ...up to maxCombos (all 9 patterns)
+ *
+ * At any moment, each contact has at most ONE pattern in flight.
+ * No contact ever has combo[1] tried before ALL contacts finish combo[0].
+ *
+ * Why this prevents SPAM Blocks:
+ *   10,000 rows with 500 at acme.com → acme.com hit once every ~20 requests
+ *   At 17 req/sec → one acme.com probe every ~1.2 seconds (safe)
+ *   Between waves → entire wave duration as natural rest per domain
+ *
+ * SPAM Block handling:
+ *   OLD: 12 retries, 6-12 min wasted, then halt entire job
+ *   NEW: Skip instantly, advance to next combo in next wave.
+ *        If blocked 2 consecutive waves → mark rate_limited (domain issue)
+ *
+ * Domain cache:
+ *   Catch-All or No MX for one contact → apply to ALL contacts on that domain
+ */
+
 const MAX_COMBOS_DEFAULT = 8;
-const MAX_RATE_LIMIT_RETRIES_PER_COMBO = 2;
-const RATE_LIMIT_POOL_PAUSE_MIN_MS = 30_000;
-const RATE_LIMIT_POOL_PAUSE_MAX_MS = 60_000;
-
-function randomPoolPause() {
-  return RATE_LIMIT_POOL_PAUSE_MIN_MS + Math.floor(Math.random() * (RATE_LIMIT_POOL_PAUSE_MAX_MS - RATE_LIMIT_POOL_PAUSE_MIN_MS));
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export async function processContactsInBatches(contacts, {
   verifyEmail,
@@ -26,6 +42,7 @@ export async function processContactsInBatches(contacts, {
   const concurrency = Math.max(1, Number(config.comboBatchSize) || 1);
   const log = (msg) => { if (jobId) appendJobLog(jobId, msg); };
 
+  // ── Build initial states ──
   const states = contacts.map((contact) => ({
     contact,
     patterns: generatePatterns(contact) || [],
@@ -35,113 +52,113 @@ export async function processContactsInBatches(contacts, {
     status: null,
     details: {},
     resultsPerCombo: [],
-    rateLimitRetries: 0,
+    spamBlockCount: 0,  // consecutive SPAM blocks across waves
   }));
 
-  log(`Starting ${states.length} contacts, concurrency=${concurrency}`);
+  log(`[Barrier] Starting ${states.length} contacts, concurrency=${concurrency}, maxCombos=${maxCombos}`);
 
-  let nextScan = 0;
-  let inFlight = 0;
-  let halted = false;
+  // ── Domain-level cache ──
+  // Catch-All or No MX applies to every contact on that domain.
+  const domainCache = new Map();  // domain → { status, details, bestEmailFn }
+
+  let haltType = '';
   let haltReason = '';
-  let haltType = ''; // 'stop' | 'pause' | 'spam' | 'limit'
-
-  await new Promise((resolveAll) => {
-    function pickNextPending() {
-      if (halted) return null;
-      // Check stop signal
-      if (jobId && isStopRequested(jobId)) {
-        if (!halted) {
-          halted = true;
-          haltType = 'stop';
-          haltReason = 'Job stopped by user';
-          log('STOP signal received — halting pool');
-        }
-        return null;
-      }
-      // Check pause signal
-      if (jobId && isPauseRequested(jobId)) {
-        if (!halted) {
-          halted = true;
-          haltType = 'pause';
-          haltReason = 'Job paused by user';
-          log('PAUSE signal received — halting pool');
-        }
-        return null;
-      }
-      for (let i = 0; i < states.length; i++) {
-        const idx = (nextScan + i) % states.length;
-        const s = states[idx];
-        if (!s.done && s.currentComboIndex < maxCombos && s.currentComboIndex < s.patterns.length) {
-          nextScan = (idx + 1) % states.length;
-          return s;
-        }
-      }
-      return null;
-    }
-
-    function tryLaunch() {
-      while (inFlight < concurrency) {
-        const state = pickNextPending();
-        if (!state) {
-          if (inFlight === 0) resolveAll();
-          return;
-        }
-        inFlight++;
-        processOneState(state)
-          .then(() => { inFlight--; tryLaunch(); })
-          .catch(() => { inFlight--; tryLaunch(); });
-      }
-    }
-
-    async function processOneState(state) {
-      try {
-        await advanceState(state, verifyEmail, maxCombos, onResult, log, () => {
-          // Called when this contact triggers a spam block halt
-          if (!halted) {
-            halted = true;
-            haltType = 'spam';
-            haltReason = 'SPAM block persisted after all retries — job halted';
-            log(`SPAM BLOCK — halting entire job`);
-          }
-        });
-      } catch (err) {
-        if (err instanceof DailyLimitExhaustedError) {
-          if (!halted) {
-            halted = true;
-            haltType = 'limit';
-            haltReason = err.message;
-            log(`DAILY LIMIT REACHED — ${err.message}`);
-          }
-        }
-      }
-    }
-
-    if (states.length === 0) resolveAll();
-    else tryLaunch();
-  });
-
-  // Collect unprocessed rowIds (contacts not done when halted)
   const unprocessedRowIds = [];
 
-  // Finalize remaining
+  // ────────────────────────────────────────────
+  //  WAVE LOOP — one combo pattern per wave
+  // ────────────────────────────────────────────
+  for (let wave = 0; wave < maxCombos; wave++) {
+
+    // Build queue: contacts that still need processing at this combo index
+    const waveQueue = [];
+    for (const state of states) {
+      if (!state.done && state.currentComboIndex === wave && wave < state.patterns.length) {
+        waveQueue.push(state);
+      }
+    }
+
+    if (waveQueue.length === 0) {
+      log(`[Barrier] Wave ${wave}: no contacts remaining — done early`);
+      break;
+    }
+
+    log(`[Barrier] Wave ${wave}: ${waveQueue.length} contacts queued`);
+
+    // ── Apply domain cache before making any API calls ──
+    const apiQueue = [];
+    for (const state of waveQueue) {
+      const domain = extractDomain(state.patterns[wave]);
+      const cached = domainCache.get(domain);
+
+      if (cached) {
+        state.bestEmail = cached.bestEmailFn ? cached.bestEmailFn(state) : null;
+        state.status = cached.status;
+        state.details = { ...cached.details };
+        state.done = true;
+        state.resultsPerCombo.push({
+          email: state.patterns[wave],
+          code: 'cached',
+          message: `${cached.status} (domain cache)`,
+          error: null,
+        });
+        log(`${state.patterns[wave]} → ${cached.status} (domain cache)`);
+        if (onResult) await onResult(buildResultPayload(state));
+      } else {
+        apiQueue.push(state);
+      }
+    }
+
+    const cachedCount = waveQueue.length - apiQueue.length;
+    if (cachedCount > 0) {
+      log(`[Barrier] Wave ${wave}: ${cachedCount} resolved from domain cache, ${apiQueue.length} need API`);
+    }
+
+    if (apiQueue.length === 0) continue;
+
+    // ── Process this wave with concurrent workers ──
+    const waveResult = await runWavePool(apiQueue, {
+      wave,
+      verifyEmail,
+      concurrency,
+      domainCache,
+      onResult,
+      jobId,
+      log,
+    });
+
+    // Check for job-level halts (stop/pause/daily limit)
+    if (waveResult.haltType) {
+      haltType = waveResult.haltType;
+      haltReason = waveResult.haltReason;
+      log(`[Barrier] Wave ${wave} halted: ${haltType}`);
+      break;
+    }
+
+    // ── Advance combo index for contacts that need next wave ──
+    for (const state of apiQueue) {
+      if (!state.done) {
+        // Rejected or SPAM-skipped → move to next combo for next wave
+        state.currentComboIndex += 1;
+      }
+    }
+
+    // ── BARRIER — wave complete, log stats ──
+    const doneThisWave = waveQueue.filter((s) => s.done).length;
+    const totalRemaining = states.filter((s) => !s.done).length;
+    log(`[Barrier] Wave ${wave} complete: ${doneThisWave} resolved, ${totalRemaining} remaining`);
+  }
+
+  // ────────────────────────────────────────────
+  //  Finalize remaining contacts
+  // ────────────────────────────────────────────
   for (const state of states) {
     if (!state.done) {
-      if (halted) {
-        // For stop/pause: do NOT update CSV — just track as unprocessed
-        if (haltType === 'stop' || haltType === 'pause') {
-          state.done = true;
-          const rowId = state.contact?.rowId;
-          if (typeof rowId === 'number') unprocessedRowIds.push(rowId);
-          // No onResult call — CSV stays empty for this row
-        } else {
-          // Daily limit or spam halt: mark rate_limited and notify
-          state.bestEmail = null;
-          state.status = DELIVERY_STATUS.RATE_LIMITED;
-          state.details = { reason: haltReason };
-          state.done = true;
-          if (onResult) await onResult(buildResultPayload(state));
-        }
+      if (haltType) {
+        // ALL halt types: track as unprocessed for rerun
+        state.done = true;
+        const rowId = state.contact?.rowId;
+        if (typeof rowId === 'number') unprocessedRowIds.push(rowId);
       } else {
         await finalizeState(state, onResult, log);
       }
@@ -149,7 +166,7 @@ export async function processContactsInBatches(contacts, {
   }
 
   const doneCount = states.filter((s) => s.done).length;
-  log(`Completed: ${doneCount}/${states.length} contacts`);
+  log(`[Barrier] Completed: ${doneCount}/${states.length} contacts`);
 
   return {
     results: states.map((state) => ({
@@ -165,97 +182,196 @@ export async function processContactsInBatches(contacts, {
   };
 }
 
-async function advanceState(state, verifyEmail, maxCombos, notify, log, onSpamHalt) {
-  if (state.done) return;
-  if (state.currentComboIndex >= maxCombos || state.currentComboIndex >= state.patterns.length) {
-    await finalizeState(state, notify, log);
-    return;
-  }
+// ────────────────────────────────────────────────────────
+//  Wave pool: process all contacts at one combo index
+// ────────────────────────────────────────────────────────
 
-  const email = state.patterns[state.currentComboIndex];
-  let result;
-  try {
-    result = await verifyEmail(email);
-  } catch (error) {
-    if (error instanceof DailyLimitExhaustedError) throw error;
-    result = { code: null, message: null, error: error.message };
-  }
+async function runWavePool(queue, { wave, verifyEmail, concurrency, domainCache, onResult, jobId, log }) {
+  let cursor = 0;
+  let inFlight = 0;
+  let halted = false;
+  let haltType = '';
+  let haltReason = '';
 
-  // Rate-limit: don't advance combo, pause and retry
-  if (result?._rateLimited) {
-    state.rateLimitRetries += 1;
-    if (state.rateLimitRetries <= MAX_RATE_LIMIT_RETRIES_PER_COMBO) {
-      const pauseMs = randomPoolPause();
-      log(`Rate-limited on ${email}, pausing ${Math.round(pauseMs / 1000)}s (retry ${state.rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES_PER_COMBO})`);
-      await sleep(pauseMs);
-      return;
+  await new Promise((resolveAll) => {
+
+    function pickNext() {
+      if (halted) return null;
+
+      // Check stop/pause signals
+      if (jobId && isStopRequested(jobId)) {
+        halted = true;
+        haltType = 'stop';
+        haltReason = 'Job stopped by user';
+        log('[Barrier] STOP signal received');
+        return null;
+      }
+      if (jobId && isPauseRequested(jobId)) {
+        halted = true;
+        haltType = 'pause';
+        haltReason = 'Job paused by user';
+        log('[Barrier] PAUSE signal received');
+        return null;
+      }
+
+      while (cursor < queue.length) {
+        const state = queue[cursor++];
+        if (!state.done) return state;
+      }
+      return null;
     }
-    // Retries exhausted — halt the entire job
-    log(`Rate-limit retries exhausted for ${email} — halting job`);
-    state.rateLimitRetries = 0;
-    state.bestEmail = null;
-    state.status = DELIVERY_STATUS.RATE_LIMITED;
-    state.details = { reason: 'SPAM Block persisted after all retries' };
-    state.done = true;
-    state.resultsPerCombo.push({ email, code: result?.code ?? null, message: 'SPAM Block', error: 'Rate limit' });
-    if (notify) await notify(buildResultPayload(state));
-    if (onSpamHalt) onSpamHalt();
-    return;
-  }
 
-  state.rateLimitRetries = 0;
-  state.resultsPerCombo.push({
-    email,
-    code: result?.code ?? null,
-    message: result?.message ?? null,
-    error: result?.error ?? null,
+    function tryLaunch() {
+      while (inFlight < concurrency) {
+        const state = pickNext();
+        if (!state) {
+          if (inFlight === 0) resolveAll();
+          return;
+        }
+        inFlight++;
+        processOneContact(state)
+          .then(() => { inFlight--; tryLaunch(); })
+          .catch(() => { inFlight--; tryLaunch(); });
+      }
+    }
+
+    async function processOneContact(state) {
+      const email = state.patterns[wave];
+      const domain = extractDomain(email);
+      let result;
+
+      try {
+        result = await verifyEmail(email);
+      } catch (err) {
+        if (err instanceof DailyLimitExhaustedError) {
+          if (!halted) {
+            halted = true;
+            haltType = 'limit';
+            haltReason = err.message;
+            log(`[Barrier] DAILY LIMIT — ${err.message}`);
+          }
+          return;
+        }
+        result = { code: null, message: null, error: err.message };
+      }
+
+      // ── SPAM Block: skip and move on ──
+      if (result?._rateLimited) {
+        state.spamBlockCount += 1;
+        state.resultsPerCombo.push({
+          email,
+          code: result.code ?? null,
+          message: result.message ?? 'SPAM Block',
+          error: `SPAM Block (consecutive: ${state.spamBlockCount})`,
+        });
+
+        if (state.spamBlockCount >= 2) {
+          // Blocked 2 consecutive waves → domain is persistently blocking
+          state.bestEmail = null;
+          state.status = DELIVERY_STATUS.RATE_LIMITED;
+          state.details = {
+            reason: `SPAM Block on ${domain} persisted across waves`,
+            code: result.code || null,
+            message: result.message || null,
+          };
+          state.done = true;
+          log(`${email} → SPAM Block (2nd consecutive) — rate_limited`);
+          if (onResult) await onResult(buildResultPayload(state));
+        } else {
+          // First SPAM Block → skip, will try next combo in next wave
+          log(`${email} → SPAM Block — skipping to next wave`);
+          // state.done stays false, combo index will be advanced after wave
+        }
+        return;
+      }
+
+      // ── Normal response — reset SPAM counter ──
+      state.spamBlockCount = 0;
+
+      state.resultsPerCombo.push({
+        email,
+        code: result?.code ?? null,
+        message: result?.message ?? null,
+        error: result?.error ?? null,
+      });
+
+      // ── No MX — cache for entire domain ──
+      if (isMissingMxRecords(result)) {
+        state.bestEmail = null;
+        state.status = DELIVERY_STATUS.MX_NOT_FOUND;
+        state.details = { reason: 'Domain missing MX records' };
+        state.done = true;
+        domainCache.set(domain, {
+          status: DELIVERY_STATUS.MX_NOT_FOUND,
+          details: { reason: 'Domain missing MX records (cached)' },
+          bestEmailFn: null,
+        });
+        log(`${email} → No MX (caching ${domain})`);
+        if (onResult) await onResult(buildResultPayload(state));
+        return;
+      }
+
+      // ── Timeout ──
+      if (isTimeout(result)) {
+        state.bestEmail = null;
+        state.status = DELIVERY_STATUS.ERROR;
+        state.details = { reason: 'Domain lookup timed out' };
+        state.done = true;
+        log(`${email} → Timeout`);
+        if (onResult) await onResult(buildResultPayload(state));
+        return;
+      }
+
+      // ── Catch-All — cache for entire domain ──
+      if (isCatchAll(result)) {
+        state.bestEmail = state.patterns[0] || null;
+        state.status = DELIVERY_STATUS.CATCH_ALL;
+        state.details = { reason: 'Domain reported Catch-All' };
+        state.done = true;
+        domainCache.set(domain, {
+          status: DELIVERY_STATUS.CATCH_ALL,
+          details: { reason: 'Domain reported Catch-All (cached)' },
+          bestEmailFn: (s) => s.patterns[0] || null,
+        });
+        log(`${email} → Catch-All (caching ${domain})`);
+        if (onResult) await onResult(buildResultPayload(state));
+        return;
+      }
+
+      // ── Valid ──
+      if (result?.code === 'ok') {
+        state.bestEmail = email;
+        state.status = DELIVERY_STATUS.VALID;
+        state.details = { code: result.code, message: result.message };
+        state.done = true;
+        log(`${email} → Valid ✓`);
+        if (onResult) await onResult(buildResultPayload(state));
+        return;
+      }
+
+      // ── Rejected — stays in pool for next wave ──
+      log(`${email} → Rejected (wave ${wave})`);
+      // state.done stays false, combo index advanced after wave completes
+    }
+
+    if (queue.length === 0) resolveAll();
+    else tryLaunch();
   });
 
-  if (isMissingMxRecords(result)) {
-    state.bestEmail = null;
-    state.status = DELIVERY_STATUS.MX_NOT_FOUND;
-    state.details = { reason: 'Domain missing MX records' };
-    state.done = true;
-    log(`${email} → No MX`);
-    if (notify) await notify(buildResultPayload(state));
-    return;
-  }
-  if (isTimeout(result)) {
-    state.bestEmail = null;
-    state.status = DELIVERY_STATUS.ERROR;
-    state.details = { reason: 'Domain lookup timed out' };
-    state.done = true;
-    log(`${email} → Timeout`);
-    if (notify) await notify(buildResultPayload(state));
-    return;
-  }
-  if (isCatchAll(result)) {
-    state.bestEmail = state.patterns[0] || null;
-    state.status = DELIVERY_STATUS.CATCH_ALL;
-    state.details = { reason: 'Domain reported Catch-All' };
-    state.done = true;
-    log(`${email} → Catch-All`);
-    if (notify) await notify(buildResultPayload(state));
-    return;
-  }
-  if (result?.code === 'ok') {
-    state.bestEmail = email;
-    state.status = DELIVERY_STATUS.VALID;
-    state.details = { code: result.code, message: result.message };
-    state.done = true;
-    log(`${email} → Valid ✓`);
-    if (notify) await notify(buildResultPayload(state));
-    return;
-  }
-
-  log(`${email} → Rejected (combo ${state.currentComboIndex + 1}/${state.patterns.length})`);
-  state.currentComboIndex += 1;
+  return { haltType, haltReason };
 }
+
+// ────────────────────────────────────────────────────────
+//  Helpers (unchanged from original)
+// ────────────────────────────────────────────────────────
 
 async function finalizeState(state, notify, log) {
   if (state.done) return;
   const allCatchAll = state.resultsPerCombo.length > 0 &&
-    state.resultsPerCombo.every((e) => e.message === 'Catch-All');
+    state.resultsPerCombo.every((e) =>
+      e.message === 'Catch-All' ||
+      (typeof e.message === 'string' && e.message.includes('catch_all'))
+    );
 
   if (allCatchAll) {
     state.bestEmail = state.patterns[2] || state.patterns[0] || null;
@@ -274,6 +390,12 @@ async function finalizeState(state, notify, log) {
 
 function buildResultPayload(state) {
   return { contact: state.contact, bestEmail: state.bestEmail, status: state.status, details: state.details, resultsPerCombo: state.resultsPerCombo };
+}
+
+function extractDomain(email) {
+  if (!email) return '';
+  const at = email.lastIndexOf('@');
+  return at >= 0 ? email.slice(at + 1).toLowerCase() : '';
 }
 
 function isMissingMxRecords(r) {
