@@ -9,11 +9,13 @@ export const COLUMN_ALIASES = {
   lastName: ['last name', 'lastname', 'last'],
   website: ['website', 'domain', 'company website', 'company domain'],
   websiteOne: ['website_one', 'website one', 'websiteone', 'website 1', 'second domain', 'domain 2', '2nd domain'],
+  websiteTwo: ['website_two', 'website two', 'websitetwo', 'website 2', 'third domain', 'domain 3', '3rd domain'],
   email: ['email', 'e-mail', 'work email', 'business email'],
 };
 
 export const OUTPUT_COLUMNS = ['First Name', 'Last Name', 'Website'];
 
 export const WEBSITE_ONE_COLUMN = 'Website_one';
+export const WEBSITE_TWO_COLUMN = 'Website_two';
 
 export const CSV_APPEND_COLUMNS = ['Email', 'Status', 'Domain Used', 'Notes'];

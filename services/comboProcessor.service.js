@@ -28,6 +28,12 @@ import { isStopRequested, isPauseRequested, appendJobLog } from './jobState.serv
  *
  * Domain cache:
  *   Catch-All or No MX for one contact → apply to ALL contacts on that domain
+ *
+ * no_domain status:
+ *   Contact had an empty domain column for this pass — generatePatterns returned [].
+ *   Wave 0 is skipped entirely. Finalized as no_domain (not not_found) to
+ *   distinguish "never attempted" from "all combos tried and rejected".
+ *   no_domain contacts are still eligible for the next pass in enricher.service.js.
  */
 
 const MAX_COMBOS_DEFAULT = 8;
@@ -362,11 +368,26 @@ async function runWavePool(queue, { wave, verifyEmail, concurrency, domainCache,
 }
 
 // ────────────────────────────────────────────────────────
-//  Helpers (unchanged from original)
+//  Finalize remaining contacts after all waves complete
 // ────────────────────────────────────────────────────────
 
 async function finalizeState(state, notify, log) {
   if (state.done) return;
+
+  // Empty patterns = domain column was blank for this pass.
+  // Marked as no_domain — distinct from not_found (which means all combos
+  // were tried and rejected). no_domain contacts remain eligible for the
+  // next pass in enricher.service.js.
+  if (state.patterns.length === 0) {
+    state.bestEmail = null;
+    state.status = DELIVERY_STATUS.NO_DOMAIN;
+    state.details = { reason: 'No domain provided for this pass' };
+    state.done = true;
+    if (log) log(`Finalized ${state.contact.firstName} ${state.contact.lastName} → no_domain`);
+    if (notify) await notify(buildResultPayload(state));
+    return;
+  }
+
   const allCatchAll = state.resultsPerCombo.length > 0 &&
     state.resultsPerCombo.every((e) =>
       e.message === 'Catch-All' ||
