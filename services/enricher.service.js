@@ -3,7 +3,7 @@ import { verifyEmail } from '../clients/mailtester.client.js';
 import { processContactsInBatches } from './comboProcessor.service.js';
 import { DELIVERY_STATUS } from './upload/status.utils.js';
 
-const MAX_COMBOS = 8;
+const MAX_COMBOS = 9;
 
 /**
  * Serial three-pass enrichment — Website → Website_one → Website_two
@@ -67,6 +67,7 @@ const DOMAIN_FAILURE_STATUSES = new Set([
   DELIVERY_STATUS.NO_DOMAIN,
   DELIVERY_STATUS.MX_NOT_FOUND,
   DELIVERY_STATUS.ERROR,
+  DELIVERY_STATUS.RATE_LIMITED,
 ]);
 
 /**
@@ -75,9 +76,13 @@ const DOMAIN_FAILURE_STATUSES = new Set([
  *
  * @param {string} priorDomain  — domain string from the prior column (may be '')
  * @param {string} priorStatus  — DELIVERY_STATUS value from the prior pass result
+ * @param {string} [newStatus]  — DELIVERY_STATUS value from the current pass result
  */
-function priorShouldDefer(priorDomain, priorStatus) {
-  return !priorDomain || DOMAIN_FAILURE_STATUSES.has(priorStatus);
+function priorShouldDefer(priorDomain, priorStatus, newStatus) {
+  if (!priorDomain || DOMAIN_FAILURE_STATUSES.has(priorStatus)) return true;
+  // not_found has no email — catch_all from a later pass provides one
+  if (priorStatus === DELIVERY_STATUS.NOT_FOUND && newStatus === DELIVERY_STATUS.CATCH_ALL) return true;
+  return false;
 }
 
 export async function enrichContacts(contacts, options = {}) {
@@ -157,7 +162,7 @@ export async function enrichContacts(contacts, options = {}) {
           if (!info) return;
 
           const d2IsValid = result.status === DELIVERY_STATUS.VALID;
-          const d1Defers = priorShouldDefer(info.originalDomain, info.d1Status);
+          const d1Defers = priorShouldDefer(info.originalDomain, info.d1Status, result.status);
 
           if (d2IsValid || d1Defers) {
             await options.onResult({
@@ -189,7 +194,7 @@ export async function enrichContacts(contacts, options = {}) {
       const d2 = d2Batch.results[i];
       if (!d2) return;
       const d2IsValid = d2.status === DELIVERY_STATUS.VALID;
-      const d1Defers = priorShouldDefer(contact.domain, d1Result.status);
+      const d1Defers = priorShouldDefer(contact.domain, d1Result.status, d2.status);
       if (d2IsValid || d1Defers) {
         partialResults[originalIndex] = buildMergedResult(d2, d1Result, 'Website_one', d2IsValid);
       }
@@ -216,7 +221,7 @@ export async function enrichContacts(contacts, options = {}) {
     if (!d2) return;
 
     const d2IsValid = d2.status === DELIVERY_STATUS.VALID;
-    const d1Defers = priorShouldDefer(contact.domain, d1Result.status);
+    const d1Defers = priorShouldDefer(contact.domain, d1Result.status, d2.status);
 
     if (d2IsValid || d1Defers) {
       intermediateResults[originalIndex] = buildMergedResult(d2, d1Result, 'Website_one', d2IsValid);
@@ -287,7 +292,7 @@ export async function enrichContacts(contacts, options = {}) {
         if (!info) return;
 
         const d3IsValid = result.status === DELIVERY_STATUS.VALID;
-        const priorDefers = priorShouldDefer(info.priorDomain, info.priorStatus);
+        const priorDefers = priorShouldDefer(info.priorDomain, info.priorStatus, result.status);
 
         if (d3IsValid || priorDefers) {
           const origIdx = originalIndexByRowId.get(rowId);
@@ -323,7 +328,7 @@ export async function enrichContacts(contacts, options = {}) {
     if (!d3) return;
 
     const d3IsValid = d3.status === DELIVERY_STATUS.VALID;
-    const priorDefers = priorShouldDefer(priorDomain, priorStatus);
+    const priorDefers = priorShouldDefer(priorDomain, priorStatus, d3.status);
 
     if (d3IsValid || priorDefers) {
       finalResults[originalIndex] = buildMergedResult(d3, intermediateResult, 'Website_two', d3IsValid);

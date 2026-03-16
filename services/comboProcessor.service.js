@@ -36,7 +36,7 @@ import { isStopRequested, isPauseRequested, appendJobLog } from './jobState.serv
  *   no_domain contacts are still eligible for the next pass in enricher.service.js.
  */
 
-const MAX_COMBOS_DEFAULT = 8;
+const MAX_COMBOS_DEFAULT = 9;
 
 export async function processContactsInBatches(contacts, {
   verifyEmail,
@@ -317,13 +317,18 @@ async function runWavePool(queue, { wave, verifyEmail, concurrency, domainCache,
         return;
       }
 
-      // ── Timeout ──
+      // ── Timeout — cache for entire domain ──
       if (isTimeout(result)) {
         state.bestEmail = null;
         state.status = DELIVERY_STATUS.ERROR;
         state.details = { reason: 'Domain lookup timed out' };
         state.done = true;
-        log(`${email} → Timeout`);
+        domainCache.set(domain, {
+          status: DELIVERY_STATUS.ERROR,
+          details: { reason: 'Domain lookup timed out (cached)' },
+          bestEmailFn: null,
+        });
+        log(`${email} → Timeout (caching ${domain})`);
         if (onResult) await onResult(buildResultPayload(state));
         return;
       }
