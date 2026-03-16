@@ -22,12 +22,26 @@ const issuesTitle = $('#issues-title');
 const issuesTbody = $('#issues-tbody');
 const issuesClose = $('#issues-close');
 
+// ── Catch-all Cleaner DOM refs ──
+const catchallOverlay = $('#catchall-overlay');
+const catchallTitle = $('#catchall-title');
+const catchallClose = $('#catchall-close');
+const catchallStatusPill = $('#catchall-status-pill');
+const catchallRunBtn = $('#catchall-run-btn');
+const catchallStopBtn = $('#catchall-stop-btn');
+const catchallLogs = $('#catchall-logs');
+
 let jobs = [];
 let pollTimer = null;
 let logsPollTimer = null;
 let openLogJobId = null;
 let pollGraceCount = 0;         // consecutive polls with no running jobs
 const POLL_GRACE_CYCLES = 3;    // keep polling this many extra cycles after last "run"
+
+// ── Catch-all Cleaner state ──
+let cleanerStates = {};          // jobId → { status, counts, logs }
+let openCleanerJobId = null;
+let cleanerPollTimer = null;
 
 // ── Icons (inline SVG) ──
 const ICONS = {
@@ -147,6 +161,11 @@ function renderJobs() {
     const isRunning = job.status === 'run';
     const canRerun = job.status === 'stop' || job.status === 'pause';
 
+    // Catch-all cleaner state for this job
+    const cleanerSt = cleanerStates[job.jobId];
+    const cleanerBtnClass = cleanerSt?.status === 'running' ? 'running' : cleanerSt?.status === 'done' ? 'done' : cleanerSt?.status === 'error' ? 'error' : '';
+    const cleanerBtnLabel = cleanerSt?.status === 'running' ? 'Cleaning...' : 'Catch-all Cleaner';
+
     return `<tr data-job="${job.jobId}">
       <td><div class="file-cell"><strong>${esc(job.originalFilename || 'Untitled')}</strong><span class="meta">${fmtDate(job.createdAt)}</span></div></td>
       <td><span class="pill ${job.status || 'pending'}">${fmtStatus(job.status)}</span></td>
@@ -158,6 +177,7 @@ function renderJobs() {
       <td class="col-num"><button class="other-stat-btn ${(mxNotFound + errors) > 0 ? 'has-issues' : 'muted'}" onclick="showIssues('${job.jobId}')" title="MX Not Found + Timeouts/Errors">${mxNotFound + errors}</button></td>
       <td class="col-num"><span class="stat-num ${rateLimited ? 'orange' : 'muted'}">${rateLimited}</span></td>
       <td><div class="action-row">
+        ${catchAll > 0 || cleanerSt ? `<button class="btn-action catchall-btn ${cleanerBtnClass}" onclick="openCatchallCleaner('${job.jobId}')">${cleanerBtnLabel}</button>` : ''}
         ${isRunning ? `<button class="btn-action pause" onclick="pauseJob('${job.jobId}')">Pause</button>` : ''}
         ${isRunning ? `<button class="btn-action stop" onclick="stopJob('${job.jobId}')">Stop</button>` : ''}
         ${canRerun ? `<button class="btn-action rerun" onclick="rerunJob('${job.jobId}')">Rerun</button>` : ''}
@@ -370,9 +390,154 @@ function fmtStatus(s) {
 // ── Refresh ──
 if (refreshBtn) refreshBtn.addEventListener('click', loadJobs);
 
+// ── Catch-all Cleaner ──
+window.openCatchallCleaner = (jobId) => {
+  openCleanerJobId = jobId;
+  catchallTitle.textContent = `Catch-all Cleaner — ${jobId.slice(0, 8)}…`;
+  catchallOverlay.hidden = false;
+  updateCleanerDrawer(jobId);
+  fetchCleanerStatus(jobId);
+  cleanerPollTimer = setInterval(() => fetchCleanerStatus(jobId), 2000);
+};
+
+catchallClose?.addEventListener('click', closeCatchallDrawer);
+catchallOverlay?.addEventListener('click', (e) => { if (e.target === catchallOverlay) closeCatchallDrawer(); });
+
+function closeCatchallDrawer() {
+  catchallOverlay.hidden = true;
+  openCleanerJobId = null;
+  if (cleanerPollTimer) { clearInterval(cleanerPollTimer); cleanerPollTimer = null; }
+}
+
+async function fetchCleanerStatus(jobId) {
+  try {
+    const res = await fetch(`/v1/scraper/enricher/jobs/${jobId}/catchall-cleaner/status`);
+    const data = await res.json();
+    cleanerStates[jobId] = data;
+    if (openCleanerJobId === jobId) updateCleanerDrawer(jobId);
+    // Re-render job row to update button style
+    renderJobs();
+    // Stop polling if cleaner finished
+    if (data.status !== 'running' && cleanerPollTimer && openCleanerJobId === jobId) {
+      // Keep polling a few more cycles then stop
+    }
+  } catch { /* retry next tick */ }
+}
+
+async function fetchAllCleanerStates() {
+  try {
+    const res = await fetch('/v1/scraper/enricher/catchall-cleaner/states');
+    const data = await res.json();
+    cleanerStates = data.states || {};
+  } catch { /* silent */ }
+}
+
+function updateCleanerDrawer(jobId) {
+  const state = cleanerStates[jobId];
+  const status = state?.status || 'idle';
+  const counts = state?.counts || { total: 0, deliverable: 0, undeliverable: 0, comboValid: 0, comboInvalid: 0, comboSkipped: 0, error: 0, skipped: 0 };
+  const logs = state?.logs || [];
+
+  // Status pill
+  catchallStatusPill.textContent = fmtCleanerStatus(status);
+  catchallStatusPill.className = `pill ${status}`;
+
+  // Buttons
+  const isRunning = status === 'running';
+  catchallRunBtn.style.display = isRunning ? 'none' : '';
+  catchallStopBtn.style.display = isRunning ? '' : 'none';
+  catchallRunBtn.disabled = isRunning;
+
+  // Derived counts for UI
+  const comboTried = (counts.comboValid || 0) + (counts.comboInvalid || 0);
+  const unchanged = (counts.undeliverable || 0) + (counts.comboInvalid || 0) + (counts.comboSkipped || 0) + (counts.skipped || 0);
+  const verified = (counts.deliverable || 0) + (counts.undeliverable || 0) + comboTried + (counts.comboSkipped || 0) + (counts.error || 0) + (counts.skipped || 0);
+
+  // Counts
+  $('#cc-total').textContent = counts.total;
+  $('#cc-deliverable').textContent = counts.deliverable;
+  $('#cc-combo-tried').textContent = comboTried;
+  $('#cc-combo-valid').textContent = counts.comboValid;
+  $('#cc-unchanged').textContent = unchanged;
+  $('#cc-errors').textContent = counts.error;
+
+  // Progress
+  const total = counts.total || 0;
+  const pct = total > 0 ? Math.round((verified / total) * 100) : 0;
+  $('#cc-progress-text').textContent = `${verified} / ${total}`;
+  $('#cc-progress-pct').textContent = `${pct}%`;
+  $('#cc-progress-fill').style.width = `${pct}%`;
+
+  // Logs
+  catchallLogs.textContent = logs.join('\n') || 'No logs yet.';
+  catchallLogs.scrollTop = catchallLogs.scrollHeight;
+}
+
+function fmtCleanerStatus(s) {
+  return { running: 'Running', done: 'Done', stopped: 'Stopped', error: 'Error', idle: 'Idle' }[s] || 'Idle';
+}
+
+window.runCatchallCleaner = async () => {
+  if (!openCleanerJobId) return;
+  try {
+    catchallRunBtn.disabled = true;
+    catchallRunBtn.textContent = 'Starting…';
+    const res = await fetch(`/v1/scraper/enricher/jobs/${openCleanerJobId}/catchall-cleaner/run`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to start cleaner');
+    showBanner('success', `Catch-all cleaner started for job.`);
+    // Immediately start polling
+    fetchCleanerStatus(openCleanerJobId);
+  } catch (err) {
+    showBanner('error', err.message);
+  } finally {
+    catchallRunBtn.disabled = false;
+    catchallRunBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Cleaner';
+  }
+};
+
+window.stopCatchallCleaner = async () => {
+  if (!openCleanerJobId) return;
+  try {
+    await fetch(`/v1/scraper/enricher/jobs/${openCleanerJobId}/catchall-cleaner/stop`, { method: 'POST' });
+    showBanner('info', 'Stopping catch-all cleaner…');
+  } catch (err) { showBanner('error', err.message); }
+};
+
 // ── Boot ──
 (async () => {
+  await fetchAllCleanerStates();
   await loadJobs();
   checkApiStatus();
+  checkBounceBanStatus();
   setInterval(checkApiStatus, 30000);
+  setInterval(checkBounceBanStatus, 30000);
+  // Periodically refresh cleaner states for button indicators
+  setInterval(async () => {
+    await fetchAllCleanerStates();
+    renderJobs();
+  }, 5000);
 })();
+
+// ── BounceBan Status Badge ──
+async function checkBounceBanStatus() {
+  const bbStatus = $('#bb-status');
+  const bbText = $('#bb-text');
+  if (!bbStatus || !bbText) return;
+  try {
+    const res = await fetch('/v1/scraper/enricher/bounceban-status');
+    const data = await res.json();
+    bbStatus.classList.remove('ok', 'warn', 'err');
+    if (data.configured) {
+      bbStatus.classList.add('ok');
+      bbText.textContent = 'BounceBan OK';
+    } else {
+      bbStatus.classList.add('err');
+      bbText.textContent = 'BounceBan: No Key';
+    }
+  } catch {
+    bbStatus.classList.remove('ok', 'warn', 'err');
+    bbStatus.classList.add('err');
+    bbText.textContent = 'BounceBan: Error';
+  }
+}

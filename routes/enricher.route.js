@@ -1,6 +1,7 @@
 import express from 'express';
 import { startEnricher, uploadContactsFile, downloadJobResult } from '../controllers/enricher.controller.js';
 import { getJobStatus, listJobs, stopJob, pauseJob, rerunJobController, deleteJob, fetchJobLogs } from '../controllers/job.controller.js';
+import { startCleaner, stopCleaner, cleanerStatus, cleanerLogs, allCleanerStates, bounceBanStatus } from '../controllers/catchallCleaner.controller.js';
 import { prepareJobContext, uploadSingleFile } from '../middlewares/jobUpload.middleware.js';
 import { getKeyScheduler } from '../clients/keyManager.js';
 
@@ -16,6 +17,14 @@ router.post('/v1/scraper/enricher/jobs/:jobId/pause', pauseJob);
 router.post('/v1/scraper/enricher/jobs/:jobId/rerun', rerunJobController);
 router.delete('/v1/scraper/enricher/jobs/:jobId', deleteJob);
 router.get('/v1/scraper/enricher/jobs/:jobId/logs', fetchJobLogs);
+
+// ── Catch-all Cleaner (BounceBan) ──
+router.post('/v1/scraper/enricher/jobs/:jobId/catchall-cleaner/run', startCleaner);
+router.post('/v1/scraper/enricher/jobs/:jobId/catchall-cleaner/stop', stopCleaner);
+router.get('/v1/scraper/enricher/jobs/:jobId/catchall-cleaner/status', cleanerStatus);
+router.get('/v1/scraper/enricher/jobs/:jobId/catchall-cleaner/logs', cleanerLogs);
+router.get('/v1/scraper/enricher/catchall-cleaner/states', allCleanerStates);
+router.get('/v1/scraper/enricher/bounceban-status', bounceBanStatus);
 
 router.get('/v1/scraper/enricher/key-status', (_req, res) => {
   try {

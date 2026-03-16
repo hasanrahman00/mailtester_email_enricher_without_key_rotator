@@ -32,3 +32,15 @@ export const config = {
   comboBatchSize: Number(process.env.COMBO_BATCH_SIZE) || 22,
   port: Number(process.env.PORT) || 3000,
 };
+
+// ── BounceBan configuration ──
+export const bounceBanConfig = {
+  apiKey: process.env.BOUNCEBAN_API_KEY || '',
+  baseUrl: process.env.BOUNCEBAN_BASE_URL || 'https://api.bounceban.com',
+};
+
+if (bounceBanConfig.apiKey) {
+  console.log('[Config] BounceBan API key configured (catch-all cleaner ready)');
+} else {
+  console.warn('[Config] No BOUNCEBAN_API_KEY in .env — catch-all cleaner disabled');
+}

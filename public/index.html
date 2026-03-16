@@ -20,6 +20,10 @@
           </div>
         </div>
         <div class="topbar-right">
+          <div id="bb-status" class="api-badge" title="BounceBan API status">
+            <span class="api-dot"></span>
+            <span id="bb-text">BounceBan</span>
+          </div>
           <div id="api-status" class="api-badge" title="API key status">
             <span class="api-dot"></span>
             <span id="api-text">Checking...</span>
@@ -110,6 +114,77 @@
             <thead><tr><th>Issue Type</th><th>Count</th></tr></thead>
             <tbody id="issues-tbody"></tbody>
           </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Catch-all Cleaner Drawer (BounceBan) -->
+    <div id="catchall-overlay" class="overlay" hidden>
+      <div class="drawer">
+        <div class="drawer-head">
+          <h3 id="catchall-title">Catch-all Cleaner</h3>
+          <button type="button" id="catchall-close" class="btn btn-ghost">✕</button>
+        </div>
+        <div id="catchall-content" class="catchall-content">
+          <!-- Status card -->
+          <div class="catchall-status-card" id="catchall-status-card">
+            <div class="catchall-status-row">
+              <span class="catchall-status-label">Status</span>
+              <span class="pill pending" id="catchall-status-pill">Idle</span>
+            </div>
+            <div class="catchall-actions-row" id="catchall-actions-row">
+              <button class="btn btn-primary catchall-run-btn" id="catchall-run-btn" onclick="runCatchallCleaner()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Run Cleaner
+              </button>
+              <button class="btn-action stop catchall-stop-btn" id="catchall-stop-btn" onclick="stopCatchallCleaner()" style="display:none;">Stop</button>
+            </div>
+          </div>
+
+          <!-- Counts grid -->
+          <div class="catchall-counts" id="catchall-counts">
+            <div class="catchall-count-card">
+              <div class="catchall-count-num" id="cc-total">0</div>
+              <div class="catchall-count-label">Total Catch-all</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num green" id="cc-deliverable">0</div>
+              <div class="catchall-count-label">Deliverable</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num amber" id="cc-combo-tried">0</div>
+              <div class="catchall-count-label">Combos Tried</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num green" id="cc-combo-valid">0</div>
+              <div class="catchall-count-label">Combos Valid</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num muted" id="cc-unchanged">0</div>
+              <div class="catchall-count-label">Unchanged</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num red" id="cc-errors">0</div>
+              <div class="catchall-count-label">Errors</div>
+            </div>
+          </div>
+
+          <!-- Progress bar -->
+          <div class="catchall-progress-wrap" id="catchall-progress-wrap">
+            <div class="catchall-progress-label">
+              <span id="cc-progress-text">0 / 0</span>
+              <span id="cc-progress-pct">0%</span>
+            </div>
+            <div class="progress-track" style="height:8px;">
+              <div class="progress-fill" id="cc-progress-fill" style="width:0%;"></div>
+            </div>
+          </div>
+
+          <!-- Logs -->
+          <div class="catchall-logs-section">
+            <div class="catchall-logs-title">Cleaner Logs</div>
+            <pre class="logs-pre catchall-logs-pre" id="catchall-logs">No logs yet.</pre>
+          </div>
         </div>
       </div>
     </div>

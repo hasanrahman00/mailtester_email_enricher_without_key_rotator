@@ -331,9 +331,141 @@ body {
 }
 .issues-job-meta span { color: var(--text-2); font-weight: 500; }
 
+/* ── Topbar multi-badge ── */
+.topbar-right { display: flex; gap: 8px; align-items: center; }
+
+/* ── Catch-All Cleaner Button ── */
+.btn-action.catchall {
+  color: #a78bfa; border-color: rgba(167,139,250,0.35); background: rgba(167,139,250,0.1);
+}
+.btn-action.catchall:hover { background: rgba(167,139,250,0.2); color: #c4b5fd; }
+.btn-action.catchall .catchall-badge {
+  min-width: 16px; height: 16px; padding: 0 4px;
+  background: #a78bfa; color: #fff;
+  font-size: 10px; font-weight: 700; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono); line-height: 1; margin-left: 2px;
+}
+.btn-action.catchall.cleaner-running {
+  color: #fbbf24; border-color: rgba(251,191,36,0.4); background: rgba(251,191,36,0.12);
+  animation: cleanerPulse 1.5s ease-in-out infinite;
+}
+@keyframes cleanerPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* ── Cleaner Drawer ── */
+.cleaner-content { flex: 1; overflow: auto; padding: 20px; display: flex; flex-direction: column; gap: 18px; }
+
+.cleaner-status-bar { display: flex; align-items: center; gap: 12px; }
+.cleaner-status-pill {
+  display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 4px;
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+  background: var(--accent-bg); color: var(--accent-hover);
+}
+.cleaner-status-pill.running { background: var(--amber-bg); color: var(--amber); }
+.cleaner-status-pill.done { background: var(--green-bg); color: var(--green); }
+.cleaner-status-pill.stopped { background: var(--red-bg); color: var(--red); }
+.cleaner-status-pill.error { background: var(--red-bg); color: var(--red); }
+.cleaner-meta { font-size: 12px; color: var(--text-3); }
+
+.cleaner-counts {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+}
+.cleaner-count-card {
+  border-radius: var(--radius); padding: 12px 14px; border: 1px solid var(--border); background: var(--bg-surface);
+}
+.cleaner-count-card.cc-green { border-color: rgba(34,197,94,0.2); }
+.cleaner-count-card.cc-blue { border-color: rgba(59,130,246,0.2); }
+.cleaner-count-card.cc-amber { border-color: rgba(245,158,11,0.2); }
+.cleaner-count-card.cc-red { border-color: rgba(239,68,68,0.2); }
+.cleaner-count-card.cc-muted { border-color: var(--border); }
+.cleaner-count-num {
+  font-size: 22px; font-weight: 700; font-family: var(--mono); line-height: 1;
+  color: var(--text);
+}
+.cleaner-count-card.cc-green .cleaner-count-num { color: var(--green); }
+.cleaner-count-card.cc-blue .cleaner-count-num { color: var(--blue); }
+.cleaner-count-card.cc-amber .cleaner-count-num { color: var(--amber); }
+.cleaner-count-card.cc-red .cleaner-count-num { color: var(--red); }
+.cleaner-count-card.cc-muted .cleaner-count-num { color: var(--text-3); }
+.cleaner-count-label { font-size: 11px; font-weight: 600; color: var(--text-3); margin-top: 4px; }
+
+.cleaner-progress-wrap { display: flex; flex-direction: column; gap: 4px; }
+
+.cleaner-controls { display: flex; gap: 8px; align-items: center; }
+
+.cleaner-logs-section { flex: 1; display: flex; flex-direction: column; min-height: 150px; }
+.cleaner-logs-head { margin-bottom: 6px; }
+.cleaner-logs-pre { flex: 1; max-height: 300px; }
+
 /* ── Responsive ── */
 @media (max-width: 900px) {
   .upload-zone form { flex-direction: column; }
   .shell { padding: 0 12px 60px; }
   .jobs-panel, .upload-zone { padding: 14px; }
 }
+
+/* ── Catch-all Cleaner Drawer ── */
+.catchall-content { flex: 1; overflow: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+
+.catchall-status-card {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; display: flex; flex-direction: column; gap: 12px;
+}
+.catchall-status-row { display: flex; align-items: center; justify-content: space-between; }
+.catchall-status-label { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.05em; }
+.catchall-actions-row { display: flex; gap: 8px; }
+.catchall-run-btn { flex: 1; }
+.catchall-stop-btn { height: 34px; padding: 0 16px; font-size: 12px; }
+
+.catchall-counts {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+}
+.catchall-count-card {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px; text-align: center;
+}
+.catchall-count-num {
+  font-size: 22px; font-weight: 700; font-family: var(--mono); line-height: 1; color: var(--text);
+}
+.catchall-count-num.green { color: var(--green); }
+.catchall-count-num.amber { color: var(--amber); }
+.catchall-count-num.red { color: var(--red); }
+.catchall-count-num.muted { color: var(--text-3); }
+.catchall-count-label { font-size: 10px; font-weight: 600; color: var(--text-3); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+.catchall-progress-wrap {
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 16px;
+}
+.catchall-progress-label { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 12px; color: var(--text-2); font-family: var(--mono); }
+
+.catchall-logs-section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.catchall-logs-title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--text-3); margin-bottom: 6px;
+}
+.catchall-logs-pre { flex: 1; min-height: 150px; max-height: 300px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+
+/* Catch-all Cleaner action button in job row */
+.btn-action.catchall-btn {
+  color: #38bdf8; border-color: rgba(56,189,248,0.35); background: rgba(56,189,248,0.1);
+  position: relative;
+}
+.btn-action.catchall-btn:hover { background: rgba(56,189,248,0.2); color: #7dd3fc; }
+.btn-action.catchall-btn.running { color: #fbbf24; border-color: rgba(251,191,36,0.35); background: rgba(251,191,36,0.1); animation: catchallPulse 1.5s ease-in-out infinite; }
+.btn-action.catchall-btn.done { color: #34d399; border-color: rgba(52,211,153,0.35); background: rgba(52,211,153,0.1); }
+.btn-action.catchall-btn.error { color: #f87171; border-color: rgba(248,113,113,0.35); background: rgba(248,113,113,0.1); }
+
+@keyframes catchallPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* Status pill additions for cleaner */
+.pill.running { background: var(--amber-bg); color: var(--amber); }
+.pill.stopped { background: var(--red-bg); color: var(--red); }
+.pill.idle { background: rgba(255,255,255,0.05); color: var(--text-3); }
+.pill.error { background: var(--red-bg); color: var(--red); }
