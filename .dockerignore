@@ -1,0 +1,5 @@
+node_modules
+tempUploads
+.env
+.git
+.github
