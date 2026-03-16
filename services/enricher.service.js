@@ -25,11 +25,16 @@ const MAX_COMBOS = 8;
  *   This includes no_domain, not_found, catch_all, mx_not_found, error,
  *   rate_limited — anything except valid.
  *
- *   Overwrite gate:
- *     A) Pass 2 valid                    → always overwrite Pass 1 result
- *     B) Pass 1 was no_domain (empty)    → overwrite with any Pass 2 result
- *     C) Pass 1 had a real domain        → silent, Pass 1 result stays
- *        (catch_all from Pass 1 is protected from non-valid Pass 2)
+ *   Overwrite gate — priorShouldDefer() decides:
+ *     A) Pass 2 valid                              → always overwrite
+ *     B) Pass 1 was no_domain / mx_not_found /
+ *        error (domain-level failure)              → overwrite with any P2 result
+ *     C) Pass 1 had a working domain (not_found,
+ *        catch_all, rate_limited)                  → only overwrite if P2 is valid
+ *
+ *   mx_not_found is a domain-level failure — the domain has no MX records
+ *   and can NEVER receive email. Any result from the next column is better,
+ *   including catch_all. It must NOT protect against being overwritten.
  *
  *   IMPORTANT: no early return when d2Candidates is empty. Contacts with
  *   only domain3 (no domain2) must still reach Pass 3.
@@ -38,18 +43,43 @@ const MAX_COMBOS = 8;
  *   Eligible: intermediate status !== valid AND contact.domain3 is not empty.
  *   Includes contacts that skipped Pass 2 entirely (had no domain2).
  *
- *   Overwrite gate:
- *     A) Pass 3 valid                    → always overwrite best-so-far
- *     B) contact had no domain2 at all   → overwrite with any Pass 3 result
- *     C) contact had a real domain2      → silent, best-so-far stays
- *        (catch_all from Pass 2 is protected from non-valid Pass 3)
+ *   Overwrite gate — same priorShouldDefer() logic shifted one pass:
+ *     A) Pass 3 valid                              → always overwrite
+ *     B) intermediate was no_domain / mx_not_found /
+ *        error (domain-level failure)              → overwrite with any P3 result
+ *     C) intermediate had a working domain         → only overwrite if P3 is valid
  *
  * ── Catch-all bestEmail priority ──────────────────────────────────────
  *   Each pass uses the domain column it owns. patterns[0] = first@<that domain>.
  *   Priority naturally falls: Website → Website_one → Website_two.
- *   The overwrite gate prevents a catch-all from an earlier pass being
- *   replaced by a non-valid result from a later pass.
+ *   catch_all from an earlier pass is protected only when that domain was
+ *   a working domain (not mx_not_found/no_domain/error). A later pass with
+ *   catch_all CAN overwrite mx_not_found — giving first@website_one instead
+ *   of a dead mx_not_found with no email at all.
  */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Domain-level failure statuses — the domain itself cannot receive email.
+// Any result from the next column should overwrite these, including catch_all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DOMAIN_FAILURE_STATUSES = new Set([
+  DELIVERY_STATUS.NO_DOMAIN,
+  DELIVERY_STATUS.MX_NOT_FOUND,
+  DELIVERY_STATUS.ERROR,
+]);
+
+/**
+ * Returns true when the prior pass result should defer to the next pass.
+ * Used at both Pass 2 and Pass 3 gates.
+ *
+ * @param {string} priorDomain  — domain string from the prior column (may be '')
+ * @param {string} priorStatus  — DELIVERY_STATUS value from the prior pass result
+ */
+function priorShouldDefer(priorDomain, priorStatus) {
+  return !priorDomain || DOMAIN_FAILURE_STATUSES.has(priorStatus);
+}
+
 export async function enrichContacts(contacts, options = {}) {
   if (!Array.isArray(contacts) || contacts.length === 0) {
     return { results: [], haltType: null, unprocessedRowIds: [] };
@@ -112,7 +142,7 @@ export async function enrichContacts(contacts, options = {}) {
       domain: contact.domain2,
     }));
 
-    // Track Pass 1 domain per rowId — needed for the overwrite gate in onResult
+    // Track Pass 1 domain + status per rowId — both needed for the overwrite gate
     const d1InfoByRowId = new Map(
       d2Candidates.map(({ contact, d1Result }) => [
         contact.rowId,
@@ -126,10 +156,10 @@ export async function enrichContacts(contacts, options = {}) {
           const info = d1InfoByRowId.get(rowId);
           if (!info) return;
 
-          const d1HadEmptyDomain = !info.originalDomain;
           const d2IsValid = result.status === DELIVERY_STATUS.VALID;
+          const d1Defers = priorShouldDefer(info.originalDomain, info.d1Status);
 
-          if (d2IsValid || d1HadEmptyDomain) {
+          if (d2IsValid || d1Defers) {
             await options.onResult({
               ...result,
               domainUsed: 'Website_one',
@@ -137,7 +167,7 @@ export async function enrichContacts(contacts, options = {}) {
               _replaces: info.d1Status,
             });
           }
-          // else: Pass 1 had a real domain and Pass 2 not valid → silent, Pass 1 stays
+          // else: Pass 1 had a working domain (not_found/catch_all) → silent, Pass 1 stays
         }
       : undefined;
 
@@ -159,8 +189,8 @@ export async function enrichContacts(contacts, options = {}) {
       const d2 = d2Batch.results[i];
       if (!d2) return;
       const d2IsValid = d2.status === DELIVERY_STATUS.VALID;
-      const d1HadEmptyDomain = !contact.domain;
-      if (d2IsValid || d1HadEmptyDomain) {
+      const d1Defers = priorShouldDefer(contact.domain, d1Result.status);
+      if (d2IsValid || d1Defers) {
         partialResults[originalIndex] = buildMergedResult(d2, d1Result, 'Website_one', d2IsValid);
       }
     });
@@ -174,25 +204,27 @@ export async function enrichContacts(contacts, options = {}) {
 
   // ─────────────────────────────────────────────────────────────────────
   // Build intermediate results after Pass 2.
-  // Record domain2 per originalIndex — needed for the Pass 3 overwrite gate.
+  // Record domain2 + Pass 2 status per originalIndex for the Pass 3 gate.
   // ─────────────────────────────────────────────────────────────────────
 
   const intermediateResults = d1Results.map((r) => ({ ...r }));
   const d2DomainByOriginalIndex = new Map();
+  const d2StatusByOriginalIndex = new Map();
 
   d2Candidates.forEach(({ originalIndex, contact, d1Result }, i) => {
     const d2 = d2Batch.results[i];
     if (!d2) return;
 
-    const d1HadEmptyDomain = !contact.domain;
     const d2IsValid = d2.status === DELIVERY_STATUS.VALID;
+    const d1Defers = priorShouldDefer(contact.domain, d1Result.status);
 
-    if (d2IsValid || d1HadEmptyDomain) {
+    if (d2IsValid || d1Defers) {
       intermediateResults[originalIndex] = buildMergedResult(d2, d1Result, 'Website_one', d2IsValid);
     }
 
-    // Always record domain2 so Pass 3 gate can check if it existed
+    // Always record domain2 and its result status so Pass 3 gate can evaluate
     d2DomainByOriginalIndex.set(originalIndex, contact.domain2 || '');
+    d2StatusByOriginalIndex.set(originalIndex, d2.status);
   });
 
   // ─────────────────────────────────────────────────────────────────────
@@ -212,6 +244,8 @@ export async function enrichContacts(contacts, options = {}) {
         intermediateResult: intermediateResults[index],
         // domain2 for this contact — empty string when contact had no domain2
         priorDomain: d2DomainByOriginalIndex.get(index) ?? contact.domain2 ?? '',
+        // Pass 2 status (or intermediate status when Pass 2 was skipped)
+        priorStatus: d2StatusByOriginalIndex.get(index) ?? intermediateResults[index].status,
       });
     }
   });
@@ -234,9 +268,12 @@ export async function enrichContacts(contacts, options = {}) {
     domain: contact.domain3,
   }));
 
-  // Map rowId → priorDomain so the onResult gate can check if domain2 existed
-  const priorDomainByRowId = new Map(
-    d3Candidates.map(({ contact, priorDomain }) => [contact.rowId, priorDomain]),
+  // Map rowId → { priorDomain, priorStatus } for the onResult gate
+  const priorInfoByRowId = new Map(
+    d3Candidates.map(({ contact, priorDomain, priorStatus }) => [
+      contact.rowId,
+      { priorDomain, priorStatus },
+    ]),
   );
 
   const originalIndexByRowId = new Map(
@@ -246,13 +283,13 @@ export async function enrichContacts(contacts, options = {}) {
   const d3OnResult = options.onResult
     ? async (result) => {
         const rowId = result?.contact?.rowId;
-        const priorDomain = priorDomainByRowId.get(rowId);
-        if (priorDomain === undefined) return;
+        const info = priorInfoByRowId.get(rowId);
+        if (!info) return;
 
-        const priorHadEmptyDomain = !priorDomain;
         const d3IsValid = result.status === DELIVERY_STATUS.VALID;
+        const priorDefers = priorShouldDefer(info.priorDomain, info.priorStatus);
 
-        if (d3IsValid || priorHadEmptyDomain) {
+        if (d3IsValid || priorDefers) {
           const origIdx = originalIndexByRowId.get(rowId);
           await options.onResult({
             ...result,
@@ -261,7 +298,7 @@ export async function enrichContacts(contacts, options = {}) {
             _replaces: origIdx !== undefined ? intermediateResults[origIdx]?.status : undefined,
           });
         }
-        // else: contact had real domain2 and Pass 3 not valid → silent, intermediate stays
+        // else: prior pass had a working domain → silent, intermediate stays
       }
     : undefined;
 
@@ -281,14 +318,14 @@ export async function enrichContacts(contacts, options = {}) {
 
   const finalResults = intermediateResults.map((r) => ({ ...r }));
 
-  d3Candidates.forEach(({ originalIndex, contact, intermediateResult }, i) => {
+  d3Candidates.forEach(({ originalIndex, contact, intermediateResult, priorDomain, priorStatus }, i) => {
     const d3 = d3Batch.results[i];
     if (!d3) return;
 
-    const priorHadEmptyDomain = !contact.domain2;
     const d3IsValid = d3.status === DELIVERY_STATUS.VALID;
+    const priorDefers = priorShouldDefer(priorDomain, priorStatus);
 
-    if (d3IsValid || priorHadEmptyDomain) {
+    if (d3IsValid || priorDefers) {
       finalResults[originalIndex] = buildMergedResult(d3, intermediateResult, 'Website_two', d3IsValid);
     }
   });
