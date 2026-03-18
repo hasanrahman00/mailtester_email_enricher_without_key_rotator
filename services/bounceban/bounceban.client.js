@@ -7,6 +7,10 @@
  *
  * Rate limits: 100 req/s per endpoint.
  * Uses a serial queue to guarantee 10ms spacing even under concurrency.
+ *
+ * Poll behaviour: polls indefinitely (up to ABSOLUTE_TIMEOUT_MS) rather than
+ * giving up after N polls. Slow verifications are kept alive while other rows
+ * process concurrently — they resolve whenever BounceBan finally responds.
  */
 
 import axios from 'axios';
@@ -14,19 +18,17 @@ import axios from 'axios';
 const BASE_URL = () => process.env.BOUNCEBAN_BASE_URL || 'https://api.bounceban.com';
 const API_KEY  = () => process.env.BOUNCEBAN_API_KEY  || '';
 
-const SUBMIT_INTERVAL_MS   = 10;   // ≤100 req/s
-const STATUS_INTERVAL_MS   = 10;
-const STATUS_POLL_DELAY    = 2000; // wait before first status poll
-const STATUS_POLL_MAX      = 30;   // max polls (~60 s)
-const STATUS_POLL_INTERVAL = 2000;
+const SUBMIT_INTERVAL_MS   = 10;               // ≤100 req/s on submit endpoint
+const STATUS_INTERVAL_MS   = 10;               // ≤100 req/s on status endpoint
+const STATUS_POLL_DELAY    = 1500;             // wait before first status poll (ms)
+const STATUS_POLL_INTERVAL = 1500;             // base interval between polls (ms)
+const ABSOLUTE_TIMEOUT_MS  = 10 * 60 * 1000;  // 10 min hard ceiling per email
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 // ── Serial queue-based throttle ──────────────────────────────────────────────
-// A simple promise chain that guarantees each request waits at least N ms after
-// the previous one, regardless of how many concurrent callers are waiting.
-// This replaces the broken timestamp-based throttle that got bypassed by
-// concurrent Promise.allSettled calls all reading the same lastTime.
+// Promise chain guarantees each request waits >= N ms after the previous one,
+// regardless of how many concurrent callers are waiting.
 
 let submitQueue = Promise.resolve();
 let statusQueue = Promise.resolve();
@@ -87,37 +89,53 @@ export async function pollVerificationStatus(id) {
 
 /**
  * High-level: submit + poll until a terminal result is available.
+ *
+ * Never gives up early — keeps polling until BounceBan returns a terminal
+ * result or the ABSOLUTE_TIMEOUT_MS wall-clock limit is reached.
+ * All slow verifications run concurrently alongside other rows.
+ *
  * Returns { email, result, raw }
  *   result: "deliverable" | "undeliverable" | "risky" | "unknown" | "error"
  */
 export async function verifyEmail(email) {
+  const deadline = Date.now() + ABSOLUTE_TIMEOUT_MS;
+
   try {
     const submitRes = await submitVerification(email);
 
-    // Immediate terminal result
+    // Immediate terminal result (some emails resolve on submit)
     if (submitRes.result && !isPending(submitRes.result)) {
       return { email, result: normalizeResult(submitRes.result), raw: submitRes };
     }
 
     const verificationId = submitRes.id;
     if (!verificationId) {
+      // No ID and no immediate result — treat as unknown
       return { email, result: normalizeResult(submitRes.result || 'unknown'), raw: submitRes };
     }
 
-    // Poll for status
+    // Wait before first poll
     await sleep(STATUS_POLL_DELAY);
 
-    for (let i = 0; i < STATUS_POLL_MAX; i++) {
+    // Poll indefinitely until terminal result or absolute deadline
+    let pollCount = 0;
+    while (Date.now() < deadline) {
+      pollCount++;
       const statusRes = await pollVerificationStatus(verificationId);
       const result = statusRes.result || statusRes.status;
 
       if (result && !isPending(result)) {
         return { email, result: normalizeResult(result), raw: statusRes };
       }
-      await sleep(STATUS_POLL_INTERVAL);
+
+      // Exponential back-off capped at 5 s for very long-running checks
+      const wait = Math.min(STATUS_POLL_INTERVAL * Math.pow(1.2, Math.min(pollCount - 1, 8)), 5000);
+      await sleep(wait);
     }
 
-    return { email, result: 'unknown', raw: { timeout: true } };
+    // Absolute timeout reached
+    return { email, result: 'unknown', raw: { timeout: true, pollCount } };
+
   } catch (err) {
     if (err.response?.status === 408) {
       return { email, result: 'unknown', raw: { timeout: true, status: 408 } };
@@ -128,16 +146,17 @@ export async function verifyEmail(email) {
 
 function isPending(r) {
   const v = String(r).toLowerCase().trim();
-  return v === 'pending' || v === 'processing';
+  return v === 'pending' || v === 'processing' || v === 'queued' || v === 'in_progress';
 }
 
 function normalizeResult(raw) {
   if (!raw) return 'unknown';
   const r = String(raw).toLowerCase().trim();
-  if (r === 'deliverable' || r === 'valid') return 'deliverable';
-  if (r === 'undeliverable' || r === 'invalid') return 'undeliverable';
-  if (r === 'risky' || r === 'catch-all' || r === 'catchall' || r === 'accept_all' || r === 'accept-all') return 'risky';
-  if (r === 'unknown') return 'unknown';
+  if (r === 'deliverable' || r === 'valid')                    return 'deliverable';
+  if (r === 'undeliverable' || r === 'invalid')                return 'undeliverable';
+  if (r === 'risky' || r === 'catch-all' || r === 'catchall' ||
+      r === 'accept_all' || r === 'accept-all')                return 'risky';
+  if (r === 'unknown')                                         return 'unknown';
   return r;
 }
 
