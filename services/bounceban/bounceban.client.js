@@ -1,148 +1,120 @@
 /**
- * BounceBan API Client
+ * BounceBan API Client — Waterfall Edition
  *
- * Two-step verification:
- *   1. GET /v1/verify/single?email=xxx  → { id, result?, ... }
- *   2. GET /v1/verify/single/status?id=xxx → { result: "deliverable"|"undeliverable"|... }
+ * Uses the waterfall endpoint which holds the connection open and returns
+ * the result directly — no submit + poll loop needed.
  *
- * Rate limits: 100 req/s per endpoint.
- * Uses a serial queue to guarantee 10ms spacing even under concurrency.
+ * Endpoint: https://api-waterfall.bounceban.com/v1/verify/single
+ *   - Waits up to 80s internally before returning 408
+ *   - 408 retries within 30 min are FREE (no credit charged)
+ *   - Supports thousands of concurrent connections
  *
- * Poll behaviour: polls indefinitely (up to ABSOLUTE_TIMEOUT_MS) rather than
- * giving up after N polls. Slow verifications are kept alive while other rows
- * process concurrently — they resolve whenever BounceBan finally responds.
+ * Concurrency: semaphore caps at MAX_CONCURRENT (100) parallel open
+ * connections. All callers beyond that queue and are served as slots free up.
  */
 
 import axios from 'axios';
 
-const BASE_URL = () => process.env.BOUNCEBAN_BASE_URL || 'https://api.bounceban.com';
-const API_KEY  = () => process.env.BOUNCEBAN_API_KEY  || '';
+const WATERFALL_URL      = 'https://api-waterfall.bounceban.com';
+const API_KEY            = () => process.env.BOUNCEBAN_API_KEY || '';
 
-const SUBMIT_INTERVAL_MS   = 10;               // ≤100 req/s on submit endpoint
-const STATUS_INTERVAL_MS   = 10;               // ≤100 req/s on status endpoint
-const STATUS_POLL_DELAY    = 1500;             // wait before first status poll (ms)
-const STATUS_POLL_INTERVAL = 1500;             // base interval between polls (ms)
-const ABSOLUTE_TIMEOUT_MS  = 10 * 60 * 1000;  // 10 min hard ceiling per email
+const MAX_CONCURRENT     = 100;       // max parallel open connections to BounceBan
+const WATERFALL_TIMEOUT  = 85_000;    // axios timeout — 80s (BounceBan) + 5s buffer
+const MAX_RETRIES        = 5;         // retries on 408 (free within 30 min window)
+const RETRY_DELAY_MS     = 2_000;     // pause before each 408 retry
+const RATE_LIMIT_DELAY   = 5_000;     // pause on 429 before retry
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-// ── Serial queue-based throttle ──────────────────────────────────────────────
-// Promise chain guarantees each request waits >= N ms after the previous one,
-// regardless of how many concurrent callers are waiting.
+// ── Semaphore — caps parallel open HTTP connections ──────────────────────────
+// When 100 slots are in use, new callers wait in a queue.
+// As soon as any slot finishes (success or error), the next waiter is unblocked.
 
-let submitQueue = Promise.resolve();
-let statusQueue = Promise.resolve();
+let activeCount = 0;
+const waitQueue = [];
 
-function enqueueSubmit() {
-  let release;
-  const ticket = new Promise((r) => { release = r; });
-  const prev = submitQueue;
-  submitQueue = ticket;
-  return prev.then(() => sleep(SUBMIT_INTERVAL_MS)).then(() => release);
+function acquireSlot() {
+  if (activeCount < MAX_CONCURRENT) {
+    activeCount++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waitQueue.push(resolve));
 }
 
-function enqueueStatus() {
-  let release;
-  const ticket = new Promise((r) => { release = r; });
-  const prev = statusQueue;
-  statusQueue = ticket;
-  return prev.then(() => sleep(STATUS_INTERVAL_MS)).then(() => release);
-}
-
-/**
- * Submit a single email for verification.
- */
-export async function submitVerification(email) {
-  const release = await enqueueSubmit();
-  try {
-    const key = API_KEY();
-    if (!key) throw new Error('BOUNCEBAN_API_KEY not set');
-
-    const { data } = await axios.get(`${BASE_URL()}/v1/verify/single`, {
-      params: { email },
-      headers: { Authorization: key },
-      timeout: 30_000,
-    });
-    return data;
-  } finally {
-    release();
+function releaseSlot() {
+  if (waitQueue.length > 0) {
+    const next = waitQueue.shift();
+    next(); // unblock next waiter — activeCount stays the same
+  } else {
+    activeCount--;
   }
 }
 
-/**
- * Poll verification result by id.
- */
-export async function pollVerificationStatus(id) {
-  const release = await enqueueStatus();
-  try {
-    const key = API_KEY();
-    const { data } = await axios.get(`${BASE_URL()}/v1/verify/single/status`, {
-      params: { id },
-      headers: { Authorization: key },
-      timeout: 30_000,
-    });
-    return data;
-  } finally {
-    release();
-  }
-}
+// ── Main verify function ─────────────────────────────────────────────────────
 
 /**
- * High-level: submit + poll until a terminal result is available.
+ * Verify a single email via the BounceBan waterfall endpoint.
  *
- * Never gives up early — keeps polling until BounceBan returns a terminal
- * result or the ABSOLUTE_TIMEOUT_MS wall-clock limit is reached.
- * All slow verifications run concurrently alongside other rows.
+ * Acquires a concurrency slot, fires the request, retries on 408 up to
+ * MAX_RETRIES times (free within 30 min), then releases the slot.
  *
  * Returns { email, result, raw }
  *   result: "deliverable" | "undeliverable" | "risky" | "unknown" | "error"
  */
 export async function verifyEmail(email) {
-  const deadline = Date.now() + ABSOLUTE_TIMEOUT_MS;
+  await acquireSlot();
 
   try {
-    const submitRes = await submitVerification(email);
+    const key = API_KEY();
+    if (!key) throw new Error('BOUNCEBAN_API_KEY not set');
 
-    // Immediate terminal result (some emails resolve on submit)
-    if (submitRes.result && !isPending(submitRes.result)) {
-      return { email, result: normalizeResult(submitRes.result), raw: submitRes };
-    }
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const { data } = await axios.get(`${WATERFALL_URL}/v1/verify/single`, {
+          params: { email },
+          headers: { Authorization: key },
+          timeout: WATERFALL_TIMEOUT,
+        });
 
-    const verificationId = submitRes.id;
-    if (!verificationId) {
-      // No ID and no immediate result — treat as unknown
-      return { email, result: normalizeResult(submitRes.result || 'unknown'), raw: submitRes };
-    }
+        // Terminal result returned directly — no polling needed
+        if (data.result && !isPending(data.result)) {
+          return { email, result: normalizeResult(data.result), raw: data };
+        }
 
-    // Wait before first poll
-    await sleep(STATUS_POLL_DELAY);
+        // Response came back but result is still pending — treat as unknown
+        return { email, result: 'unknown', raw: data };
 
-    // Poll indefinitely until terminal result or absolute deadline
-    let pollCount = 0;
-    while (Date.now() < deadline) {
-      pollCount++;
-      const statusRes = await pollVerificationStatus(verificationId);
-      const result = statusRes.result || statusRes.status;
+      } catch (err) {
+        const status = err.response?.status;
 
-      if (result && !isPending(result)) {
-        return { email, result: normalizeResult(result), raw: statusRes };
+        if (status === 408) {
+          // BounceBan timed out internally — retry is FREE within 30 min
+          if (attempt < MAX_RETRIES) {
+            await sleep(RETRY_DELAY_MS);
+            continue;
+          }
+          return { email, result: 'unknown', raw: { timeout: true, attempts: attempt } };
+        }
+
+        if (status === 429) {
+          // Rate limited — pause and retry
+          await sleep(RATE_LIMIT_DELAY);
+          continue;
+        }
+
+        // Any other error — don't retry
+        return { email, result: 'error', raw: { error: err.message, status } };
       }
-
-      // Exponential back-off capped at 5 s for very long-running checks
-      const wait = Math.min(STATUS_POLL_INTERVAL * Math.pow(1.2, Math.min(pollCount - 1, 8)), 5000);
-      await sleep(wait);
     }
 
-    // Absolute timeout reached
-    return { email, result: 'unknown', raw: { timeout: true, pollCount } };
+    return { email, result: 'unknown', raw: { timeout: true } };
 
-  } catch (err) {
-    if (err.response?.status === 408) {
-      return { email, result: 'unknown', raw: { timeout: true, status: 408 } };
-    }
-    return { email, result: 'error', raw: { error: err.message, status: err.response?.status } };
+  } finally {
+    releaseSlot();
   }
 }
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function isPending(r) {
   const v = String(r).toLowerCase().trim();
