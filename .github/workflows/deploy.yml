@@ -17,5 +17,7 @@ jobs:
           script: |
             cd /opt/email-enricher
             git reset --hard HEAD
+            git clean -fd
             git pull origin main
-            docker compose up -d --build --force-recreate --remove-orphans
+            docker compose down
+            docker compose up -d --build
