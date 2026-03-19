@@ -1,25 +1,34 @@
 /**
  * Catch-All Cleaner Service
  *
- * Flow per row:
- *   1. Read the job's output CSV
- *   2. Filter rows where Status === 'catch_all'
- *   3. For each catch_all row, run the combo chain via BounceBan:
+ * Processes TWO categories of rows:
  *
- *      a) Verify original email
- *         - deliverable → set status = 'valid', done
- *         - risky       → set status = 'risky', keep email, done
- *         - undeliverable → proceed to combo chain
+ * ═══ Category A: catch_all rows (have an existing email) ═══
  *
- *      b) Combo 1: firstname.lastname@domain
- *         - deliverable → overwrite email, set status = 'valid', done
- *         - risky       → set status = 'risky', keep combo email, done
- *         - undeliverable → try combo 2
+ *   1. Verify original email via BounceBan:
+ *      - deliverable   → status = 'valid', done
+ *      - risky         → status = 'risky', keep email, done
+ *      - undeliverable → proceed to combo chain (2 combos)
  *
- *      c) Combo 2: firstinitial+lastname@domain  (e.g. jsmith@domain)
- *         - deliverable → overwrite email, set status = 'valid', done
- *         - risky       → set status = 'risky', keep combo email, done
- *         - undeliverable → leave row unchanged (still catch_all)
+ *   2. Combo chain (catch_all):
+ *      a) firstname.lastname@domain
+ *      b) firstinitial+lastname@domain  (e.g. jsmith@domain)
+ *
+ *      First deliverable/risky wins. If all fail → leave as catch_all.
+ *
+ * ═══ Category B: rate_limited / error rows (email is EMPTY) ═══
+ *
+ *   No original email to verify. Domain resolved from 'Domain Used' column,
+ *   falling back to 'Website' → 'Website_one' → 'Website_two'.
+ *
+ *   Combo chain (3 combos):
+ *      a) first@domain             (e.g. john@domain)
+ *      b) firstname.lastname@domain
+ *      c) firstinitial+lastname@domain
+ *
+ *      First deliverable → email = combo, status = 'valid', done.
+ *      First risky/catch_all → email = combo, status = that result, done.
+ *      All fail → status = 'not_found', email stays empty.
  *
  * Guards:
  *   - Last name must be >= 2 chars to attempt combos (skips initials like "c", "g")
@@ -27,9 +36,8 @@
  *     for that domain (saves BounceBan credits)
  *   - Combo that equals the original email is skipped silently
  *
- * Concurrency: ALL catch_all rows start concurrently. The serial queue in
- * bounceban.client throttles actual HTTP requests to <=100 req/s automatically.
- * Slow verifications never block other rows — they resolve in the background.
+ * Concurrency: ALL rows start concurrently. The semaphore in
+ * bounceban.client throttles actual HTTP requests to <=100 parallel.
  *
  * CSV is flushed to disk every CSV_FLUSH_INTERVAL_MS to preserve partial progress.
  */
@@ -126,15 +134,16 @@ function serializeCsv(headers, rows) {
   return [headerLine, ...bodyLines].join('\n') + '\n';
 }
 
-// ── Combo builder ────────────────────────────────────────────────────────────
+// ── Combo builders ──────────────────────────────────────────────────────────
 
 const MIN_LAST_NAME_LENGTH = 2;  // skip initials like "c", "g", "p"
 
 /**
- * Returns an ordered list of combo emails to try, excluding any that match
- * the original email. Returns empty array if name data is insufficient.
+ * Combos for catch_all rows (have an original email).
+ * Returns 2 combos: firstname.lastname@domain, firstinitial+lastname@domain
+ * Excludes any that match the original email.
  */
-function buildCombos(firstName, lastName, domain, originalEmail) {
+function buildCatchAllCombos(firstName, lastName, domain, originalEmail) {
   if (!firstName || !lastName || !domain) return [];
   if (lastName.length < MIN_LAST_NAME_LENGTH) return [];
 
@@ -144,8 +153,36 @@ function buildCombos(firstName, lastName, domain, originalEmail) {
     `${firstName[0]}${lastName}@${domain}`,       // jsmith@domain
   ];
 
-  // Deduplicate and remove if same as original
   const seen = new Set([orig]);
+  return candidates.filter((c) => {
+    const lc = c.toLowerCase();
+    if (seen.has(lc)) return false;
+    seen.add(lc);
+    return true;
+  });
+}
+
+/**
+ * Combos for rate_limited / error rows (email is EMPTY).
+ * Returns 3 combos: first@domain, firstname.lastname@domain, firstinitial+lastname@domain
+ */
+function buildErrorCombos(firstName, lastName, domain) {
+  if (!firstName || !domain) return [];
+
+  const candidates = [
+    `${firstName}@${domain}`,                     // john@domain
+  ];
+
+  // Only add lastname-based combos if last name is long enough
+  if (lastName && lastName.length >= MIN_LAST_NAME_LENGTH) {
+    candidates.push(
+      `${firstName}.${lastName}@${domain}`,        // john.smith@domain
+      `${firstName[0]}${lastName}@${domain}`,      // jsmith@domain
+    );
+  }
+
+  // Deduplicate
+  const seen = new Set();
   return candidates.filter((c) => {
     const lc = c.toLowerCase();
     if (seen.has(lc)) return false;
@@ -158,6 +195,12 @@ function buildCombos(firstName, lastName, domain, originalEmail) {
 
 const CSV_FLUSH_INTERVAL_MS = 8_000;  // write CSV to disk every 8 s
 
+// ── Status normalization helper ─────────────────────────────────────────────
+
+function normalizeStatus(raw) {
+  return (raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+}
+
 // ── Main cleaner ────────────────────────────────────────────────────────────
 
 export async function startCatchAllCleaner(jobId) {
@@ -169,15 +212,23 @@ export async function startCatchAllCleaner(jobId) {
     status: 'running',
     stop: false,
     counts: {
-      total: 0,
+      // ── catch_all counts ──
+      catchAllTotal: 0,
       deliverable: 0,   // original email confirmed deliverable
       risky: 0,         // BounceBan returned risky (original or combo)
       undeliverable: 0, // original undeliverable, no combo attempted (missing name/domain)
       comboValid: 0,    // a combo email was confirmed deliverable
       comboInvalid: 0,  // all combos were undeliverable
       comboSkipped: 0,  // domain blacklisted or last name too short
+      // ── rate_limited / error counts ──
+      errorTotal: 0,    // total rate_limited + error rows found
+      errorFixed: 0,    // combo found deliverable for error/rate_limited row
+      errorRisky: 0,    // combo returned risky/catch_all for error/rate_limited row
+      errorNotFound: 0, // all combos failed → status set to not_found
+      errorSkipped: 0,  // missing name/domain, domain blacklisted
+      // ── shared ──
       error: 0,
-      skipped: 0,       // empty email or unknown/error result
+      skipped: 0,       // empty email on catch_all, or unknown/error bounce result
     },
     logs: [],
     startedAt: new Date().toISOString(),
@@ -207,27 +258,38 @@ export async function startCatchAllCleaner(jobId) {
 
     // Resolve column names (case-insensitive)
     const find = (candidates) => headers.find((h) => candidates.includes(h.toLowerCase().trim()));
-    const statusCol    = find(['status'])                          || 'Status';
-    const emailCol     = find(['email', 'e-mail'])                 || 'Email';
-    const firstNameCol = find(['first name', 'firstname', 'first']) || 'First Name';
-    const lastNameCol  = find(['last name', 'lastname', 'last'])   || 'Last Name';
-    const notesCol     = find(['notes'])                           || 'Notes';
+    const statusCol      = find(['status'])                                          || 'Status';
+    const emailCol       = find(['email', 'e-mail'])                                 || 'Email';
+    const firstNameCol   = find(['first name', 'firstname', 'first'])                || 'First Name';
+    const lastNameCol    = find(['last name', 'lastname', 'last'])                   || 'Last Name';
+    const notesCol       = find(['notes'])                                           || 'Notes';
+    const domainUsedCol  = find(['domain used', 'domainused', 'domain_used'])        || 'Domain Used';
+    const websiteCol     = find(['website', 'domain', 'company website'])            || 'Website';
+    const websiteOneCol  = find(['website_one', 'website one', 'websiteone'])        || 'Website_one';
+    const websiteTwoCol  = find(['website_two', 'website two', 'websitetwo'])        || 'Website_two';
 
-    // Filter catch_all rows
+    // ── Collect rows by category ─────────────────────────────────────────────
     const catchAllIndices = [];
+    const errorIndices = [];    // rate_limited + error rows
+
     rows.forEach((row, idx) => {
-      const s = (row[statusCol] || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+      const s = normalizeStatus(row[statusCol]);
       if (s === 'catch_all' || s === 'catchall') {
         catchAllIndices.push(idx);
+      } else if (s === 'rate_limited' || s === 'ratelimited' || s === 'error') {
+        errorIndices.push(idx);
       }
     });
 
-    state.counts.total = catchAllIndices.length;
-    log(`Found ${catchAllIndices.length} catch-all rows out of ${rows.length} total`);
+    state.counts.catchAllTotal = catchAllIndices.length;
+    state.counts.errorTotal = errorIndices.length;
+    const totalRows = catchAllIndices.length + errorIndices.length;
 
-    if (catchAllIndices.length === 0) {
+    log(`Found ${catchAllIndices.length} catch-all + ${errorIndices.length} rate_limited/error rows out of ${rows.length} total`);
+
+    if (totalRows === 0) {
       state.status = 'done';
-      log('No catch-all rows to process. Done.');
+      log('No rows to process. Done.');
       return state.counts;
     }
 
@@ -237,21 +299,26 @@ export async function startCatchAllCleaner(jobId) {
       catchAllCleaner: { status: 'running', startedAt: state.startedAt, counts: state.counts },
     });
 
-    const ctx = { emailCol, firstNameCol, lastNameCol, statusCol, notesCol, log, state, failedComboDomains };
+    const ctx = {
+      emailCol, firstNameCol, lastNameCol, statusCol, notesCol,
+      domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol,
+      log, state, failedComboDomains,
+    };
 
     // ── Launch ALL rows concurrently ─────────────────────────────────────────
-    // The serial queue in bounceban.client throttles HTTP requests to <=100/s.
-    // Slow verifications keep polling in the background without blocking others.
-    const promises = catchAllIndices.map((rowIdx) => processSingleRow(rows, rowIdx, ctx));
+    const promises = [
+      ...catchAllIndices.map((rowIdx) => processCatchAllRow(rows, rowIdx, ctx)),
+      ...errorIndices.map((rowIdx) => processErrorRow(rows, rowIdx, ctx)),
+    ];
 
     // ── Periodic CSV flush ───────────────────────────────────────────────────
-    // Writes current state of rows to disk every N ms so partial progress is
-    // preserved if the process crashes before all rows complete.
     const flushInterval = setInterval(async () => {
       try {
         await fs.writeFile(csvPath, serializeCsv(headers, rows), 'utf-8');
-        const done = Object.values(state.counts).reduce((a, b) => a + b, 0) - state.counts.total;
-        log(`Progress: ${Math.max(0, done)}/${state.counts.total} rows done`);
+        const c = state.counts;
+        const catchAllDone = c.deliverable + c.risky + c.undeliverable + c.comboValid + c.comboInvalid + c.comboSkipped + c.skipped;
+        const errorDone = c.errorFixed + c.errorRisky + c.errorNotFound + c.errorSkipped;
+        log(`Progress: catch_all ${catchAllDone}/${c.catchAllTotal}, error/rate_limited ${errorDone}/${c.errorTotal}`);
 
         const meta = await readMetadata(jobDir);
         if (meta) {
@@ -272,26 +339,50 @@ export async function startCatchAllCleaner(jobId) {
     state.status = state.stop ? 'stopped' : 'done';
     log(
       `Cleaner ${state.status}. ` +
-      `Deliverable: ${state.counts.deliverable}, ` +
-      `Risky: ${state.counts.risky}, ` +
-      `Combo valid: ${state.counts.comboValid}, ` +
-      `Combo invalid: ${state.counts.comboInvalid}, ` +
-      `Combo skipped: ${state.counts.comboSkipped}, ` +
-      `Undeliverable: ${state.counts.undeliverable}, ` +
+      `[catch_all] Deliverable: ${state.counts.deliverable}, Risky: ${state.counts.risky}, ` +
+      `Combo valid: ${state.counts.comboValid}, Combo invalid: ${state.counts.comboInvalid}, ` +
+      `Combo skipped: ${state.counts.comboSkipped}, Undeliverable: ${state.counts.undeliverable}. ` +
+      `[error/rate_limited] Fixed: ${state.counts.errorFixed}, Risky: ${state.counts.errorRisky}, ` +
+      `Not found: ${state.counts.errorNotFound}, Skipped: ${state.counts.errorSkipped}. ` +
       `Errors: ${state.counts.error}`
     );
 
     // Adjust main job status counts in metadata
-    const totalUpgraded = state.counts.deliverable + state.counts.comboValid;
+    const catchAllUpgraded = state.counts.deliverable + state.counts.comboValid;
+    const catchAllRisky = state.counts.risky;
+    const errorUpgraded = state.counts.errorFixed;
+    const errorRisky = state.counts.errorRisky;
+    const errorToNotFound = state.counts.errorNotFound;
+
     const finalMeta = await readMetadata(jobDir);
     if (finalMeta) {
       if (finalMeta.progress?.statusCounts) {
-        if (totalUpgraded > 0) {
-          finalMeta.progress.statusCounts.catch_all = Math.max(
-            0, (finalMeta.progress.statusCounts.catch_all || 0) - totalUpgraded - state.counts.risky,
-          );
-          finalMeta.progress.statusCounts.valid = (finalMeta.progress.statusCounts.valid || 0) + totalUpgraded;
-          finalMeta.progress.statusCounts.risky = (finalMeta.progress.statusCounts.risky || 0) + state.counts.risky;
+        const sc = finalMeta.progress.statusCounts;
+
+        // ── catch_all adjustments ──
+        if (catchAllUpgraded > 0 || catchAllRisky > 0) {
+          sc.catch_all = Math.max(0, (sc.catch_all || 0) - catchAllUpgraded - catchAllRisky);
+          sc.valid = (sc.valid || 0) + catchAllUpgraded;
+          sc.risky = (sc.risky || 0) + catchAllRisky;
+        }
+
+        // ── rate_limited / error adjustments ──
+        // Rows that got a valid combo → move from error/rate_limited to valid
+        if (errorUpgraded > 0) {
+          sc.error = Math.max(0, (sc.error || 0) - errorUpgraded);
+          sc.rate_limited = Math.max(0, (sc.rate_limited || 0) - errorUpgraded);
+          sc.valid = (sc.valid || 0) + errorUpgraded;
+        }
+        if (errorRisky > 0) {
+          sc.error = Math.max(0, (sc.error || 0) - errorRisky);
+          sc.rate_limited = Math.max(0, (sc.rate_limited || 0) - errorRisky);
+          sc.risky = (sc.risky || 0) + errorRisky;
+        }
+        // Rows that became not_found → move from error/rate_limited to not_found
+        if (errorToNotFound > 0) {
+          sc.error = Math.max(0, (sc.error || 0) - errorToNotFound);
+          sc.rate_limited = Math.max(0, (sc.rate_limited || 0) - errorToNotFound);
+          sc.not_found = (sc.not_found || 0) + errorToNotFound;
         }
       }
       await writeMetadata(jobDir, {
@@ -316,9 +407,26 @@ export async function startCatchAllCleaner(jobId) {
   }
 }
 
-// ── Single row processor ─────────────────────────────────────────────────────
+// ── Resolve domain for error/rate_limited rows ──────────────────────────────
 
-async function processSingleRow(rows, rowIdx, ctx) {
+function resolveDomain(row, domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol) {
+  // Priority: Domain Used → Website → Website_one → Website_two
+  const candidates = [
+    row[domainUsedCol],
+    row[websiteCol],
+    row[websiteOneCol],
+    row[websiteTwoCol],
+  ];
+  for (const raw of candidates) {
+    const d = (raw || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
+    if (d) return d;
+  }
+  return '';
+}
+
+// ── Single row processor: CATCH_ALL (existing logic) ────────────────────────
+
+async function processCatchAllRow(rows, rowIdx, ctx) {
   const { emailCol, firstNameCol, lastNameCol, statusCol, notesCol, log, state, failedComboDomains } = ctx;
   const row = rows[rowIdx];
   const email = (row[emailCol] || '').trim();
@@ -379,7 +487,7 @@ async function processSingleRow(rows, rowIdx, ctx) {
       return;
     }
 
-    const combos = buildCombos(firstName, lastName, domain, email);
+    const combos = buildCatchAllCombos(firstName, lastName, domain, email);
 
     if (combos.length === 0) {
       state.counts.undeliverable++;
@@ -423,5 +531,91 @@ async function processSingleRow(rows, rowIdx, ctx) {
   } catch (err) {
     state.counts.error++;
     log(`[${rowIdx}] Error: ${err.message}`);
+  }
+}
+
+// ── Single row processor: RATE_LIMITED / ERROR (new logic) ──────────────────
+
+async function processErrorRow(rows, rowIdx, ctx) {
+  const {
+    emailCol, firstNameCol, lastNameCol, statusCol, notesCol,
+    domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol,
+    log, state, failedComboDomains,
+  } = ctx;
+  const row = rows[rowIdx];
+  const originalStatus = (row[statusCol] || '').trim();
+
+  if (state.stop) return;
+
+  const firstName = (row[firstNameCol] || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  const lastName  = (row[lastNameCol]  || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  const domain    = resolveDomain(row, domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol);
+
+  if (!firstName || !domain) {
+    log(`[${rowIdx}] [${originalStatus}] Cannot build combo — missing firstName or domain`);
+    row[statusCol] = 'not_found';
+    row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → not_found (missing name or domain)`;
+    state.counts.errorSkipped++;
+    return;
+  }
+
+  if (failedComboDomains.has(domain)) {
+    log(`[${rowIdx}] [${originalStatus}] Domain ${domain} already failed all combos — not_found`);
+    row[statusCol] = 'not_found';
+    row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → not_found (domain blacklisted)`;
+    state.counts.errorSkipped++;
+    return;
+  }
+
+  const combos = buildErrorCombos(firstName, lastName, domain);
+
+  if (combos.length === 0) {
+    log(`[${rowIdx}] [${originalStatus}] No combos could be generated`);
+    row[statusCol] = 'not_found';
+    row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → not_found (no combos)`;
+    state.counts.errorSkipped++;
+    return;
+  }
+
+  try {
+    let anyComboAttempted = false;
+
+    for (const comboEmail of combos) {
+      if (state.stop) return;
+
+      anyComboAttempted = true;
+      const result = await verifyEmail(comboEmail);
+      log(`[${rowIdx}] [${originalStatus}] combo ${comboEmail} → ${result.result}`);
+
+      if (result.result === 'deliverable') {
+        row[emailCol]  = comboEmail;
+        row[statusCol] = 'valid';
+        row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → valid (combo: ${comboEmail})`;
+        state.counts.errorFixed++;
+        return;
+      }
+
+      if (result.result === 'risky' || result.result === 'catch_all' || result.result === 'catchall') {
+        row[emailCol]  = comboEmail;
+        row[statusCol] = result.result === 'risky' ? 'risky' : 'catch_all';
+        row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → ${row[statusCol]} (combo: ${comboEmail})`;
+        state.counts.errorRisky++;
+        return;
+      }
+
+      // undeliverable / unknown / error → try next combo
+    }
+
+    // All combos exhausted → set not_found and blacklist domain
+    if (anyComboAttempted) {
+      failedComboDomains.add(domain);
+    }
+    row[statusCol] = 'not_found';
+    row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → not_found (all combos failed)`;
+    state.counts.errorNotFound++;
+
+  } catch (err) {
+    state.counts.error++;
+    log(`[${rowIdx}] [${originalStatus}] Error: ${err.message}`);
   }
 }
