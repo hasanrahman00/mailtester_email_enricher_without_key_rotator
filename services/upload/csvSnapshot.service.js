@@ -44,12 +44,14 @@ export function buildCsvColumnOrder(headers = [], columnMap = null) {
 
 export async function loadExistingCsvRows(filePath, columns) {
   try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    const lines = content.split('\n').filter((l) => l.trim());
-    if (lines.length < 2) return null;
-    const headers = lines[0].split(',').map((h) => h.replace(/^"|"$/g, '').replace(/""/g, '"'));
-    const rows = lines.slice(1).map((line) => {
-      const values = parseCsvLine(line);
+    let content = await fs.readFile(filePath, 'utf-8');
+    // Strip UTF-8 BOM if present
+    if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+    const records = splitCsvRecords(content);
+    if (records.length < 2) return null;
+    const headers = parseCsvLine(records[0]);
+    const rows = records.slice(1).map((record) => {
+      const values = parseCsvLine(record);
       const row = {};
       headers.forEach((h, i) => { row[h] = values[i] ?? ''; });
       return row;
@@ -60,7 +62,54 @@ export async function loadExistingCsvRows(filePath, columns) {
   }
 }
 
+/**
+ * Splits raw CSV text into logical records (rows), respecting quoted fields
+ * that may contain newlines. Returns an array of record strings.
+ */
+function splitCsvRecords(text) {
+  const records = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          current += '""';
+          i++; // skip escaped quote
+        } else {
+          inQuotes = false;
+          current += ch;
+        }
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+        current += ch;
+      } else if (ch === '\n') {
+        // End of record (handle \r\n by trimming trailing \r)
+        if (current.endsWith('\r')) current = current.slice(0, -1);
+        if (current.trim()) records.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+  }
+  // Flush last record
+  if (current.endsWith('\r')) current = current.slice(0, -1);
+  if (current.trim()) records.push(current);
+
+  return records;
+}
+
 function parseCsvLine(line) {
+  // Strip trailing \r left over from \r\n splitting
+  if (line.endsWith('\r')) line = line.slice(0, -1);
   const values = [];
   let cur = '';
   let inQuotes = false;
@@ -110,10 +159,11 @@ export function composeCsvRowData(baseRow, overrides = {}) {
 }
 
 function serializeCsv(columns, rows) {
+  const BOM = '\uFEFF';
   const headerLine = columns.map((column) => escapeCsvValue(column)).join(',');
   const bodyLines = rows.map((row) => columns.map((column) => escapeCsvValue(row?.[column] ?? '')).join(','));
   const lines = [headerLine, ...bodyLines];
-  return `${lines.join('\n')}\n`;
+  return `${BOM}${lines.join('\r\n')}\r\n`;
 }
 
 function escapeCsvValue(value) {
