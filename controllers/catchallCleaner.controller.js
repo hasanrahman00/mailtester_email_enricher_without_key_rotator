@@ -56,7 +56,7 @@ export async function cleanerStatus(req, res) {
 
   return res.json({
     jobId,
-    status: state.status,
+    status: state.stop && state.status === 'running' ? 'stopping' : state.status,
     counts: { ...state.counts },
     logs: state.logs.slice(-200),
   });

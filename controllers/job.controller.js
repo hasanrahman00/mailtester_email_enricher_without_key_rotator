@@ -9,6 +9,8 @@ import {
 import {
   requestJobStop,
   requestJobPause,
+  isStopRequested,
+  isPauseRequested,
   getJobLogs,
   clearJobLogs,
   getActiveJobIds,
@@ -35,7 +37,9 @@ export async function listJobs(req, res) {
           jobId: meta.jobId,
           userId: meta.userId,
           originalFilename: meta.originalFilename,
-          status: activeIds.has(meta.jobId) ? "run" : meta.status || "run",
+          status: activeIds.has(meta.jobId)
+            ? (isStopRequested(meta.jobId) ? "stopping" : isPauseRequested(meta.jobId) ? "pausing" : "run")
+            : meta.status || "run",
           createdAt: meta.createdAt,
           completedAt: meta.completedAt || null,
           totals: meta.totals || null,
@@ -57,7 +61,7 @@ export async function listJobs(req, res) {
           jobId: activeId,
           userId: null,
           originalFilename: 'Processing…',
-          status: 'run',
+          status: isStopRequested(activeId) ? 'stopping' : isPauseRequested(activeId) ? 'pausing' : 'run',
           createdAt: new Date().toISOString(),
           completedAt: null,
           totals: null,

@@ -199,6 +199,8 @@ body {
 .pill.stop { background: var(--red-bg); color: var(--red); }
 .pill.pause { background: var(--orange-bg); color: var(--orange); }
 .pill.pending { background: var(--accent-bg); color: var(--accent-hover); }
+.pill.stopping { background: var(--orange-bg); color: var(--orange); animation: catchallPulse 1.5s ease-in-out infinite; }
+.pill.pausing { background: var(--orange-bg); color: var(--orange); animation: catchallPulse 1.5s ease-in-out infinite; }
 
 /* Progress bar in table */
 .progress-cell { display: flex; flex-direction: column; gap: 4px; }
@@ -485,3 +487,10 @@ body {
 .pill.stopped { background: var(--red-bg); color: var(--red); }
 .pill.idle { background: rgba(255,255,255,0.05); color: var(--text-3); }
 .pill.error { background: var(--red-bg); color: var(--red); }
+.pill.stopping { background: var(--orange-bg); color: var(--orange); animation: catchallPulse 1.5s ease-in-out infinite; }
+
+/* Stopping label in job action row */
+.btn-action.stopping-label {
+  color: var(--orange); border-color: rgba(249,115,22,0.35); background: rgba(249,115,22,0.1);
+  cursor: default; pointer-events: none; animation: catchallPulse 1.5s ease-in-out infinite;
+}

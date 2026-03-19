@@ -122,7 +122,7 @@ async function loadJobs() {
     jobs = merged;
     renderJobs();
 
-    const hasRunning = jobs.some((j) => j.status === 'run');
+    const hasRunning = jobs.some((j) => j.status === 'run' || j.status === 'stopping' || j.status === 'pausing');
     if (hasRunning) {
       pollGraceCount = 0;
       startPolling();
@@ -159,12 +159,13 @@ function renderJobs() {
     const errors = counts.error || 0;
     const issueCount = rateLimited + mxNotFound + errors;
     const isRunning = job.status === 'run';
+    const isStopping = job.status === 'stopping' || job.status === 'pausing';
     const canRerun = job.status === 'stop' || job.status === 'pause';
 
     // Catch-all cleaner state for this job
     const cleanerSt = cleanerStates[job.jobId];
-    const cleanerBtnClass = cleanerSt?.status === 'running' ? 'running' : cleanerSt?.status === 'done' ? 'done' : cleanerSt?.status === 'error' ? 'error' : '';
-    const cleanerBtnLabel = cleanerSt?.status === 'running' ? 'Cleaning...' : 'Catch-all Cleaner';
+    const cleanerBtnClass = cleanerSt?.status === 'running' ? 'running' : cleanerSt?.status === 'stopping' ? 'running' : cleanerSt?.status === 'done' ? 'done' : cleanerSt?.status === 'error' ? 'error' : '';
+    const cleanerBtnLabel = cleanerSt?.status === 'running' ? 'Cleaning...' : cleanerSt?.status === 'stopping' ? 'Stopping...' : 'Catch-all Cleaner';
 
     return `<tr data-job="${job.jobId}">
       <td><div class="file-cell"><strong>${esc(job.originalFilename || 'Untitled')}</strong><span class="meta">${fmtDate(job.createdAt)}</span></div></td>
@@ -180,6 +181,7 @@ function renderJobs() {
         ${catchAll > 0 || rateLimited > 0 || errors > 0 || cleanerSt ? `<button class="btn-action catchall-btn ${cleanerBtnClass}" onclick="openCatchallCleaner('${job.jobId}')">${cleanerBtnLabel}</button>` : ''}
         ${isRunning ? `<button class="btn-action pause" onclick="pauseJob('${job.jobId}')">Pause</button>` : ''}
         ${isRunning ? `<button class="btn-action stop" onclick="stopJob('${job.jobId}')">Stop</button>` : ''}
+        ${isStopping ? `<span class="btn-action stopping-label">${fmtStatus(job.status)}</span>` : ''}
         ${canRerun ? `<button class="btn-action rerun" onclick="rerunJob('${job.jobId}')">Rerun</button>` : ''}
         ${job.downloadUrl ? `<a class="btn-action download" href="${job.downloadUrl}" download>Download</a>` : ''}
         <button class="btn-action issues" onclick="showIssues('${job.jobId}')">Issues${issueCount > 0 ? ` <span class="issue-badge">${issueCount}</span>` : ''}</button>
@@ -384,7 +386,7 @@ function fmtDate(val) {
 }
 
 function fmtStatus(s) {
-  return { run: 'Running', done: 'Done', stop: 'Stopped', pause: 'Paused', failed: 'Failed' }[s] || 'Pending';
+  return { run: 'Running', done: 'Done', stop: 'Stopped', stopping: 'Stopping…', pause: 'Paused', pausing: 'Pausing…', failed: 'Failed' }[s] || 'Pending';
 }
 
 // ── Refresh ──
@@ -444,9 +446,10 @@ function updateCleanerDrawer(jobId) {
 
   // Buttons
   const isRunning = status === 'running';
-  catchallRunBtn.style.display = isRunning ? 'none' : '';
+  const isStopping = status === 'stopping';
+  catchallRunBtn.style.display = (isRunning || isStopping) ? 'none' : '';
   catchallStopBtn.style.display = isRunning ? '' : 'none';
-  catchallRunBtn.disabled = isRunning;
+  catchallRunBtn.disabled = isRunning || isStopping;
 
   // ── Catch-all derived counts ──
   const catchAllTotal = counts.catchAllTotal || counts.total || 0;  // backward compat: old jobs use 'total'
@@ -494,7 +497,7 @@ function updateCleanerDrawer(jobId) {
 }
 
 function fmtCleanerStatus(s) {
-  return { running: 'Running', done: 'Done', stopped: 'Stopped', error: 'Error', idle: 'Idle' }[s] || 'Idle';
+  return { running: 'Running', stopping: 'Stopping…', done: 'Done', stopped: 'Stopped', error: 'Error', idle: 'Idle' }[s] || 'Idle';
 }
 
 window.runCatchallCleaner = async () => {
@@ -521,6 +524,8 @@ window.stopCatchallCleaner = async () => {
   try {
     await fetch(`/v1/scraper/enricher/jobs/${openCleanerJobId}/catchall-cleaner/stop`, { method: 'POST' });
     showBanner('info', 'Stopping catch-all cleaner…');
+    // Immediately refresh drawer to show "Stopping…" status
+    await fetchCleanerStatus(openCleanerJobId);
   } catch (err) { showBanner('error', err.message); }
 };
 
