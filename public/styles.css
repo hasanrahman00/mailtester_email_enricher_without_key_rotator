@@ -432,9 +432,25 @@ body {
 }
 .catchall-count-num.green { color: var(--green); }
 .catchall-count-num.amber { color: var(--amber); }
+.catchall-count-num.orange { color: var(--orange); }
 .catchall-count-num.red { color: var(--red); }
 .catchall-count-num.muted { color: var(--text-3); }
 .catchall-count-label { font-size: 10px; font-weight: 600; color: var(--text-3); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+/* Combined total row */
+.cc-total-row { grid-template-columns: 1fr; }
+.catchall-count-card.cc-wide { padding: 14px; }
+
+/* Section headers */
+.cc-section-header {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--text-2); display: flex; align-items: center; gap: 8px; margin-top: 4px;
+}
+.cc-section-count {
+  font-family: var(--mono); font-size: 12px; font-weight: 700; color: var(--text);
+  background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px;
+  padding: 1px 7px;
+}
 
 .catchall-progress-wrap {
   background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius);

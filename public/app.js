@@ -177,7 +177,7 @@ function renderJobs() {
       <td class="col-num"><button class="other-stat-btn ${(mxNotFound + errors) > 0 ? 'has-issues' : 'muted'}" onclick="showIssues('${job.jobId}')" title="MX Not Found + Timeouts/Errors">${mxNotFound + errors}</button></td>
       <td class="col-num"><span class="stat-num ${rateLimited ? 'orange' : 'muted'}">${rateLimited}</span></td>
       <td><div class="action-row">
-        ${catchAll > 0 || cleanerSt ? `<button class="btn-action catchall-btn ${cleanerBtnClass}" onclick="openCatchallCleaner('${job.jobId}')">${cleanerBtnLabel}</button>` : ''}
+        ${catchAll > 0 || rateLimited > 0 || errors > 0 || cleanerSt ? `<button class="btn-action catchall-btn ${cleanerBtnClass}" onclick="openCatchallCleaner('${job.jobId}')">${cleanerBtnLabel}</button>` : ''}
         ${isRunning ? `<button class="btn-action pause" onclick="pauseJob('${job.jobId}')">Pause</button>` : ''}
         ${isRunning ? `<button class="btn-action stop" onclick="stopJob('${job.jobId}')">Stop</button>` : ''}
         ${canRerun ? `<button class="btn-action rerun" onclick="rerunJob('${job.jobId}')">Rerun</button>` : ''}
@@ -393,7 +393,7 @@ if (refreshBtn) refreshBtn.addEventListener('click', loadJobs);
 // ── Catch-all Cleaner ──
 window.openCatchallCleaner = (jobId) => {
   openCleanerJobId = jobId;
-  catchallTitle.textContent = `Catch-all Cleaner — ${jobId.slice(0, 8)}…`;
+  catchallTitle.textContent = `BounceBan Cleaner — ${jobId.slice(0, 8)}…`;
   catchallOverlay.hidden = false;
   updateCleanerDrawer(jobId);
   fetchCleanerStatus(jobId);
@@ -435,7 +435,7 @@ async function fetchAllCleanerStates() {
 function updateCleanerDrawer(jobId) {
   const state = cleanerStates[jobId];
   const status = state?.status || 'idle';
-  const counts = state?.counts || { total: 0, deliverable: 0, undeliverable: 0, comboValid: 0, comboInvalid: 0, comboSkipped: 0, error: 0, skipped: 0 };
+  const counts = state?.counts || {};
   const logs = state?.logs || [];
 
   // Status pill
@@ -448,23 +448,43 @@ function updateCleanerDrawer(jobId) {
   catchallStopBtn.style.display = isRunning ? '' : 'none';
   catchallRunBtn.disabled = isRunning;
 
-  // Derived counts for UI
+  // ── Catch-all derived counts ──
+  const catchAllTotal = counts.catchAllTotal || counts.total || 0;  // backward compat: old jobs use 'total'
   const comboTried = (counts.comboValid || 0) + (counts.comboInvalid || 0);
   const unchanged = (counts.undeliverable || 0) + (counts.comboInvalid || 0) + (counts.comboSkipped || 0) + (counts.skipped || 0);
-  const verified = (counts.deliverable || 0) + (counts.undeliverable || 0) + comboTried + (counts.comboSkipped || 0) + (counts.error || 0) + (counts.skipped || 0);
+  const catchAllVerified = (counts.deliverable || 0) + (counts.risky || 0) + (counts.undeliverable || 0) + comboTried + (counts.comboSkipped || 0) + (counts.error || 0) + (counts.skipped || 0);
 
-  // Counts
-  $('#cc-total').textContent = counts.total;
-  $('#cc-deliverable').textContent = counts.deliverable;
+  // ── Error/rate_limited derived counts ──
+  const errorTotal = counts.errorTotal || 0;
+  const errorVerified = (counts.errorFixed || 0) + (counts.errorRisky || 0) + (counts.errorNotFound || 0) + (counts.errorSkipped || 0);
+
+  // ── Grand total ──
+  const grandTotal = catchAllTotal + errorTotal;
+  const grandVerified = catchAllVerified + errorVerified;
+
+  // Combined total
+  $('#cc-grand-total').textContent = grandTotal;
+
+  // Catch-all section
+  $('#cc-catchall-total').textContent = catchAllTotal;
+  $('#cc-deliverable').textContent = counts.deliverable || 0;
   $('#cc-combo-tried').textContent = comboTried;
-  $('#cc-combo-valid').textContent = counts.comboValid;
+  $('#cc-combo-valid').textContent = counts.comboValid || 0;
   $('#cc-unchanged').textContent = unchanged;
-  $('#cc-errors').textContent = counts.error;
+  $('#cc-risky').textContent = counts.risky || 0;
+  $('#cc-errors').textContent = counts.error || 0;
 
-  // Progress
-  const total = counts.total || 0;
-  const pct = total > 0 ? Math.round((verified / total) * 100) : 0;
-  $('#cc-progress-text').textContent = `${verified} / ${total}`;
+  // Error/rate_limited section
+  $('#cc-error-total').textContent = errorTotal;
+  $('#cc-err-fixed').textContent = counts.errorFixed || 0;
+  $('#cc-err-risky').textContent = counts.errorRisky || 0;
+  $('#cc-err-notfound').textContent = counts.errorNotFound || 0;
+  $('#cc-err-skipped').textContent = counts.errorSkipped || 0;
+  $('#cc-err-errors').textContent = counts.error || 0;
+
+  // Progress (across both categories)
+  const pct = grandTotal > 0 ? Math.round((grandVerified / grandTotal) * 100) : 0;
+  $('#cc-progress-text').textContent = `${grandVerified} / ${grandTotal}`;
   $('#cc-progress-pct').textContent = `${pct}%`;
   $('#cc-progress-fill').style.width = `${pct}%`;
 

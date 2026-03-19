@@ -141,12 +141,17 @@
             </div>
           </div>
 
-          <!-- Counts grid -->
-          <div class="catchall-counts" id="catchall-counts">
-            <div class="catchall-count-card">
-              <div class="catchall-count-num" id="cc-total">0</div>
-              <div class="catchall-count-label">Total Catch-all</div>
+          <!-- Combined total -->
+          <div class="catchall-counts cc-total-row">
+            <div class="catchall-count-card cc-wide">
+              <div class="catchall-count-num" id="cc-grand-total">0</div>
+              <div class="catchall-count-label">Total Rows to Process</div>
             </div>
+          </div>
+
+          <!-- Catch-all section -->
+          <div class="cc-section-header">Catch-All <span class="cc-section-count" id="cc-catchall-total">0</span></div>
+          <div class="catchall-counts" id="catchall-counts">
             <div class="catchall-count-card">
               <div class="catchall-count-num green" id="cc-deliverable">0</div>
               <div class="catchall-count-label">Deliverable</div>
@@ -164,7 +169,36 @@
               <div class="catchall-count-label">Unchanged</div>
             </div>
             <div class="catchall-count-card">
+              <div class="catchall-count-num amber" id="cc-risky">0</div>
+              <div class="catchall-count-label">Risky</div>
+            </div>
+            <div class="catchall-count-card">
               <div class="catchall-count-num red" id="cc-errors">0</div>
+              <div class="catchall-count-label">Errors</div>
+            </div>
+          </div>
+
+          <!-- Error / Rate-Limited section -->
+          <div class="cc-section-header">Rate-Limited / Error <span class="cc-section-count" id="cc-error-total">0</span></div>
+          <div class="catchall-counts" id="catchall-error-counts">
+            <div class="catchall-count-card">
+              <div class="catchall-count-num green" id="cc-err-fixed">0</div>
+              <div class="catchall-count-label">Fixed (Valid)</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num amber" id="cc-err-risky">0</div>
+              <div class="catchall-count-label">Risky / Catch-All</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num muted" id="cc-err-notfound">0</div>
+              <div class="catchall-count-label">Not Found</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num muted" id="cc-err-skipped">0</div>
+              <div class="catchall-count-label">Skipped</div>
+            </div>
+            <div class="catchall-count-card">
+              <div class="catchall-count-num red" id="cc-err-errors">0</div>
               <div class="catchall-count-label">Errors</div>
             </div>
           </div>
