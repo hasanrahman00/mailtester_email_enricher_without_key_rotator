@@ -86,6 +86,8 @@ export function isCleanerRunning(jobId) {
 // ── CSV helpers ─────────────────────────────────────────────────────────────
 
 function parseCsvLine(line) {
+  // Strip trailing \r left over from \r\n splitting
+  if (line.endsWith('\r')) line = line.slice(0, -1);
   const values = [];
   let cur = '';
   let inQuotes = false;
@@ -107,31 +109,86 @@ function parseCsvLine(line) {
 
 function escapeCsv(value) {
   if (value === null || value === undefined) return '';
-  const s = String(value);
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  // Replace embedded newlines with space — prevents multi-line fields
+  const s = String(value).replace(/[\r\n]+/g, ' ');
+  if (/[",]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
 }
 
+/**
+ * Splits raw CSV text into logical records (rows), respecting quoted fields
+ * that may contain embedded newlines.
+ */
+function splitCsvRecords(text) {
+  const records = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          current += '""';
+          i++;
+        } else {
+          inQuotes = false;
+          current += ch;
+        }
+      } else {
+        current += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+        current += ch;
+      } else if (ch === '\n') {
+        if (current.endsWith('\r')) current = current.slice(0, -1);
+        if (current.trim()) records.push(current);
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+  }
+  if (current.endsWith('\r')) current = current.slice(0, -1);
+  if (current.trim()) records.push(current);
+
+  return records;
+}
+
 async function loadCsv(filePath) {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const lines = content.split('\n').filter((l) => l.trim());
-  if (lines.length < 2) return { headers: [], rows: [] };
-  const headers = parseCsvLine(lines[0]);
-  const rows = lines.slice(1).map((line) => {
-    const values = parseCsvLine(line);
+  let content = await fs.readFile(filePath, 'utf-8');
+  console.log(`[catchallCleaner] loadCsv — file size: ${content.length}, BOM present: ${content.charCodeAt(0) === 0xFEFF}`);
+  // Strip UTF-8 BOM if present
+  if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+  const records = splitCsvRecords(content);
+  console.log(`[catchallCleaner] loadCsv — records from splitCsvRecords: ${records.length}`);
+  if (records.length < 2) return { headers: [], rows: [] };
+  const headers = parseCsvLine(records[0]);
+  console.log(`[catchallCleaner] loadCsv — headers: ${headers.length}, first 3: ${headers.slice(0,3).join(' | ')}`);
+  const rows = records.slice(1).map((record) => {
+    const values = parseCsvLine(record);
     const row = {};
     headers.forEach((h, i) => { row[h] = values[i] ?? ''; });
     return row;
   });
+  console.log(`[catchallCleaner] loadCsv — parsed ${rows.length} data rows`);
   return { headers, rows };
 }
 
 function serializeCsv(headers, rows) {
+  const BOM = '\uFEFF';
+  console.log(`[catchallCleaner] serializeCsv — headers: ${headers.length}, rows: ${rows.length}`);
   const headerLine = headers.map(escapeCsv).join(',');
+  console.log(`[catchallCleaner] serializeCsv — headerLine starts with quote: ${headerLine[0] === '"'}, first 80: ${headerLine.slice(0,80)}`);
   const bodyLines = rows.map((row) =>
     headers.map((h) => escapeCsv(row[h] ?? '')).join(','),
   );
-  return [headerLine, ...bodyLines].join('\n') + '\n';
+  const result = BOM + [headerLine, ...bodyLines].join('\r\n') + '\r\n';
+  console.log(`[catchallCleaner] serializeCsv — output BOM: ${result.charCodeAt(0) === 0xFEFF}, total length: ${result.length}`);
+  return result;
 }
 
 // ── Combo builders ──────────────────────────────────────────────────────────
@@ -333,6 +390,23 @@ export async function startCatchAllCleaner(jobId) {
     await Promise.allSettled(promises);
     clearInterval(flushInterval);
 
+    // ── Final status remap: enricher labels → customer-facing labels ─────────
+    // Three final statuses: verified, risky, valid email not found
+    const FINAL_STATUS_MAP = {
+      valid:        'verified',
+      catch_all:    'risky',
+      catchall:     'risky',
+      not_found:    'valid email not found',
+      mx_not_found: 'valid email not found',
+    };
+
+    for (const row of rows) {
+      const raw = normalizeStatus(row[statusCol]);
+      if (FINAL_STATUS_MAP[raw]) {
+        row[statusCol] = FINAL_STATUS_MAP[raw];
+      }
+    }
+
     // Final CSV write
     await fs.writeFile(csvPath, serializeCsv(headers, rows), 'utf-8');
 
@@ -384,6 +458,16 @@ export async function startCatchAllCleaner(jobId) {
           sc.rate_limited = Math.max(0, (sc.rate_limited || 0) - errorToNotFound);
           sc.not_found = (sc.not_found || 0) + errorToNotFound;
         }
+
+        // ── Remap status keys to customer-facing names ──
+        // valid → verified, catch_all → risky, not_found + mx_not_found → valid email not found
+        sc['verified'] = (sc.valid || 0);
+        sc['risky'] = (sc.risky || 0) + (sc.catch_all || 0);
+        sc['valid email not found'] = (sc.not_found || 0) + (sc.mx_not_found || 0);
+        delete sc.valid;
+        delete sc.catch_all;
+        delete sc.not_found;
+        delete sc.mx_not_found;
       }
       await writeMetadata(jobDir, {
         ...finalMeta,

@@ -18,4 +18,4 @@ export const OUTPUT_COLUMNS = ['First Name', 'Last Name', 'Website'];
 export const WEBSITE_ONE_COLUMN = 'Website_one';
 export const WEBSITE_TWO_COLUMN = 'Website_two';
 
-export const CSV_APPEND_COLUMNS = ['Email', 'Status', 'Domain Used', 'Notes'];
+export const CSV_APPEND_COLUMNS = ['Email', 'Status'];

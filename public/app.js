@@ -151,9 +151,9 @@ function renderJobs() {
     const processed = job.resultCount ?? job.progress?.processedContacts ?? 0;
     const pct = total ? Math.round((processed / total) * 100) : (job.status === 'done' ? 100 : 0);
     const counts = job.progress?.statusCounts || {};
-    const valid = counts.valid || 0;
-    const catchAll = counts.catch_all || 0;
-    const notFound = counts.not_found || 0;
+    const valid = (counts.valid || 0) + (counts.verified || 0);
+    const catchAll = (counts.catch_all || 0) + (counts.risky || 0);
+    const notFound = (counts.not_found || 0) + (counts['valid email not found'] || 0);
     const rateLimited = counts.rate_limited || 0;
     const mxNotFound = counts.mx_not_found || 0;
     const errors = counts.error || 0;
@@ -255,12 +255,12 @@ window.showIssues = (jobId) => {
 
   const totalIssues = issueRows.reduce((s, r) => s + (counts[r.key] || 0), 0);
   const cleanRows = [
-    { label: 'Valid',     key: 'valid',     color: 'green' },
-    { label: 'Catch-All', key: 'catch_all', color: 'amber' },
-    { label: 'Not Found', key: 'not_found', color: 'red' },
-    { label: 'Skipped',   key: 'skipped',   color: 'muted' },
+    { label: 'Verified',               key: 'valid',                  altKey: 'verified',              color: 'green' },
+    { label: 'Risky',                  key: 'catch_all',              altKey: 'risky',                 color: 'amber' },
+    { label: 'Valid Email Not Found',  key: 'not_found',              altKey: 'valid email not found', color: 'red' },
+    { label: 'Skipped',               key: 'skipped',                altKey: null,                    color: 'muted' },
   ];
-  const totalClean = cleanRows.reduce((s, r) => s + (counts[r.key] || 0), 0);
+  const totalClean = cleanRows.reduce((s, r) => s + (counts[r.key] || 0) + (r.altKey ? (counts[r.altKey] || 0) : 0), 0);
 
   const pct = (n) => total > 0 ? `${Math.round((n / total) * 100)}%` : '—';
 
@@ -304,8 +304,8 @@ window.showIssues = (jobId) => {
     <table class="issues-table">
       <thead><tr><th>Status</th><th style="text-align:right">Count</th><th style="text-align:right">% of Total</th></tr></thead>
       <tbody>
-        ${cleanRows.map(({ label, key, color }) => {
-          const count = counts[key] || 0;
+        ${cleanRows.map(({ label, key, altKey, color }) => {
+          const count = (counts[key] || 0) + (altKey ? (counts[altKey] || 0) : 0);
           return `<tr>
             <td><span class="stat-num ${count > 0 ? color : 'muted'}">${label}</span></td>
             <td style="text-align:right"><span class="stat-num ${count > 0 ? color : 'muted'}">${count}</span></td>

@@ -38,8 +38,15 @@ export function buildCsvColumnOrder(headers = [], columnMap = null) {
   headers.forEach((header) => pushColumn(mapHeader(header)));
   OUTPUT_COLUMNS.forEach((column) => pushColumn(column));
 
+  // Remove append columns from their original position (if the input had them)
   const withoutAppendColumns = baseColumns.filter((column) => !CSV_APPEND_COLUMNS.includes(column));
-  return [...withoutAppendColumns, ...CSV_APPEND_COLUMNS];
+
+  // Insert Email & Status right after Title
+  const titleIndex = withoutAppendColumns.indexOf('Title');
+  const insertAt = titleIndex !== -1 ? titleIndex + 1 : withoutAppendColumns.length;
+  withoutAppendColumns.splice(insertAt, 0, ...CSV_APPEND_COLUMNS);
+
+  return withoutAppendColumns;
 }
 
 export async function loadExistingCsvRows(filePath, columns) {
@@ -158,20 +165,29 @@ export function composeCsvRowData(baseRow, overrides = {}) {
   return row;
 }
 
+// ──── DEBUG: if you see this log, the UPDATED csvSnapshot is loaded ────
+console.log('[csvSnapshot] ✅ UPDATED csvSnapshot.service.js loaded (BOM + CRLF version)');
+
 function serializeCsv(columns, rows) {
   const BOM = '\uFEFF';
+  console.log(`[csvSnapshot] serializeCsv called — columns: ${columns.length}, rows: ${rows.length}`);
   const headerLine = columns.map((column) => escapeCsvValue(column)).join(',');
+  console.log(`[csvSnapshot] headerLine first 80 chars: ${headerLine.slice(0, 80)}`);
+  console.log(`[csvSnapshot] headerLine starts with quote: ${headerLine[0] === '"'}`);
   const bodyLines = rows.map((row) => columns.map((column) => escapeCsvValue(row?.[column] ?? '')).join(','));
   const lines = [headerLine, ...bodyLines];
-  return `${BOM}${lines.join('\r\n')}\r\n`;
+  const result = `${BOM}${lines.join('\r\n')}\r\n`;
+  console.log(`[csvSnapshot] output byte 0 is BOM: ${result.charCodeAt(0) === 0xFEFF}`);
+  return result;
 }
 
 function escapeCsvValue(value) {
   if (value === null || value === undefined) {
     return '';
   }
-  const stringValue = String(value);
-  if (/[",\n\r]/.test(stringValue)) {
+  // Replace embedded newlines with space — prevents multi-line fields
+  const stringValue = String(value).replace(/[\r\n]+/g, ' ');
+  if (/[",]/.test(stringValue)) {
     return `"${stringValue.replace(/"/g, '""')}"`;
   }
   return stringValue;
