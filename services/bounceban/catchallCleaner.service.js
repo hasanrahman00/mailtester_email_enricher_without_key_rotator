@@ -325,6 +325,8 @@ export async function startCatchAllCleaner(jobId) {
     const websiteOneCol  = find(['website_one', 'website one', 'websiteone'])        || 'Website_one';
     const websiteTwoCol  = find(['website_two', 'website two', 'websitetwo'])        || 'Website_two';
     const sourceCol      = find(['source'])                                           || 'Source';
+    const reportNameCol  = find(['report name', 'reportname'])                         || 'Report Name';
+    const ratioCol       = find(['ratio percentage', 'ratiopercentage'])               || 'Ratio Percentage';
 
     // ── Collect rows by category ─────────────────────────────────────────────
     const catchAllIndices = [];
@@ -406,6 +408,43 @@ export async function startCatchAllCleaner(jobId) {
       if (FINAL_STATUS_MAP[raw]) {
         row[statusCol] = FINAL_STATUS_MAP[raw];
       }
+    }
+
+    // ── Regenerate Report columns (rows 0–5) with post-cleaner stats ────────
+    {
+      const totalProfiles = rows.length;
+      let emailsFound = 0, validCount = 0, catchAllCount = 0, mainCount = 0, waterfallCount = 0;
+
+      for (const row of rows) {
+        const email = (row[emailCol] || '').trim();
+        if (!email) continue;
+        emailsFound++;
+
+        const s = normalizeStatus(row[statusCol]);
+        // After remap: 'verified' = valid, 'risky' = catch_all
+        if (s === 'verified' || s === 'valid') validCount++;
+        if (s === 'risky' || s === 'catch_all' || s === 'catchall') catchAllCount++;
+
+        const src = (row[sourceCol] || '').trim().toLowerCase();
+        if (src === 'main') mainCount++;
+        if (src === 'waterfall') waterfallCount++;
+      }
+
+      const pct = (n, d) => d > 0 ? ((n / d) * 100).toFixed(1) + '%' : '0.0%';
+      const entries = [
+        { name: 'Total Profiles',  ratio: `${totalProfiles}` },
+        { name: 'Emails Found',    ratio: `${emailsFound}/${totalProfiles} (${pct(emailsFound, totalProfiles)})` },
+        { name: 'Verified',        ratio: `${validCount}/${emailsFound} (${pct(validCount, emailsFound)})` },
+        { name: 'Risky',           ratio: `${catchAllCount}/${emailsFound} (${pct(catchAllCount, emailsFound)})` },
+        { name: 'Main',            ratio: `${mainCount}/${emailsFound} (${pct(mainCount, emailsFound)})` },
+        { name: 'Waterfall',       ratio: `${waterfallCount}/${emailsFound} (${pct(waterfallCount, emailsFound)})` },
+      ];
+
+      for (let i = 0; i < entries.length && i < rows.length; i++) {
+        rows[i][reportNameCol] = entries[i].name;
+        rows[i][ratioCol]      = entries[i].ratio;
+      }
+      log(`Report regenerated: ${emailsFound} emails, ${validCount} verified, ${catchAllCount} risky, ${mainCount} main, ${waterfallCount} waterfall`);
     }
 
     // Final CSV write

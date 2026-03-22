@@ -1,10 +1,10 @@
 // Builds CSV column order and maintains an append-friendly snapshot writer for job outputs.
 import fs from 'fs/promises';
-import { OUTPUT_COLUMNS, CSV_APPEND_COLUMNS, WEBSITE_ONE_COLUMN } from './upload.constants.js';
+import { OUTPUT_COLUMNS, CSV_APPEND_COLUMNS, WEBSITE_ONE_COLUMN, REPORT_COLUMNS } from './upload.constants.js';
 
 export function buildCsvColumnOrder(headers = [], columnMap = null) {
   if (!Array.isArray(headers) || headers.length === 0) {
-    return [...OUTPUT_COLUMNS, ...CSV_APPEND_COLUMNS];
+    return [...OUTPUT_COLUMNS, ...CSV_APPEND_COLUMNS, ...REPORT_COLUMNS];
   }
 
   const [FIRST_NAME_COLUMN, LAST_NAME_COLUMN, WEBSITE_COLUMN] = OUTPUT_COLUMNS;
@@ -39,12 +39,15 @@ export function buildCsvColumnOrder(headers = [], columnMap = null) {
   OUTPUT_COLUMNS.forEach((column) => pushColumn(column));
 
   // Remove append columns from their original position (if the input had them)
-  const withoutAppendColumns = baseColumns.filter((column) => !CSV_APPEND_COLUMNS.includes(column));
+  const withoutAppendColumns = baseColumns.filter((column) => !CSV_APPEND_COLUMNS.includes(column) && !REPORT_COLUMNS.includes(column));
 
-  // Insert Email & Status right after Title
+  // Insert Email, Status & Source right after Title
   const titleIndex = withoutAppendColumns.indexOf('Title');
   const insertAt = titleIndex !== -1 ? titleIndex + 1 : withoutAppendColumns.length;
   withoutAppendColumns.splice(insertAt, 0, ...CSV_APPEND_COLUMNS);
+
+  // Report Name + Ratio Percentage always go at the very end
+  withoutAppendColumns.push(...REPORT_COLUMNS);
 
   return withoutAppendColumns;
 }
@@ -154,6 +157,9 @@ export function createCsvSnapshotWriter(filePath, columns, initialRows) {
       rows[rowId] = newRow;
       await scheduleWrite();
     },
+    getRows() {
+      return rows;
+    },
   };
 }
 
@@ -162,6 +168,8 @@ export function composeCsvRowData(baseRow, overrides = {}) {
   CSV_APPEND_COLUMNS.forEach((column) => {
     row[column] = overrides[column] ?? '';
   });
+  row[REPORT_COLUMNS[0]] = overrides[REPORT_COLUMNS[0]] ?? '';
+  row[REPORT_COLUMNS[1]] = overrides[REPORT_COLUMNS[1]] ?? '';
   return row;
 }
 

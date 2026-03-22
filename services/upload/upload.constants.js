@@ -19,3 +19,5 @@ export const WEBSITE_ONE_COLUMN = 'Website_one';
 export const WEBSITE_TWO_COLUMN = 'Website_two';
 
 export const CSV_APPEND_COLUMNS = ['Email', 'Status', 'Source'];
+
+export const REPORT_COLUMNS = ['Report Name', 'Ratio Percentage'];
