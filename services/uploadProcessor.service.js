@@ -10,6 +10,16 @@ import { createProgressSnapshot, normalizeStatusBucket } from './upload/progress
 import { buildResultSets } from './upload/resultBuilder.service.js';
 import { normalizeDeliveryStatus, DELIVERY_STATUS } from './upload/status.utils.js';
 
+/**
+ * Maps the domainUsed field from enricher results to the Source column value.
+ *   Website   → "main"       (primary domain)
+ *   Website_one / Website_two → "waterfall"  (fallback domains)
+ */
+function resolveSource(domainUsed) {
+  if (!domainUsed) return '';
+  return domainUsed === 'Website' ? 'main' : 'waterfall';
+}
+
 export async function processUploadedFile({ jobId, jobDir, file, userId, onReady }) {
   markJobActive(jobId);
   const log = (msg) => appendJobLog(jobId, msg);
@@ -89,6 +99,7 @@ export async function processUploadedFile({ jobId, jobDir, file, userId, onReady
       const csvRow = composeCsvRowData(rowInfo.sanitizedRow, {
         Email: resultPayload.bestEmail || '',
         Status: normalizeDeliveryStatus(resultPayload.status),
+        Source: resultPayload.bestEmail ? resolveSource(resultPayload.domainUsed) : '',
       });
       await csvWriter.setRow(rowId, csvRow);
     };
@@ -226,6 +237,7 @@ export async function rerunJob({ jobId, jobDir }) {
       const csvRow = composeCsvRowData(rowInfo.sanitizedRow, {
         Email: resultPayload.bestEmail || '',
         Status: normalizeDeliveryStatus(resultPayload.status),
+        Source: resultPayload.bestEmail ? resolveSource(resultPayload.domainUsed) : '',
       });
       await csvWriter.setRow(rowId, csvRow);
     };
