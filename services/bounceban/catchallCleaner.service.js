@@ -324,6 +324,7 @@ export async function startCatchAllCleaner(jobId) {
     const websiteCol     = find(['website', 'domain', 'company website'])            || 'Website';
     const websiteOneCol  = find(['website_one', 'website one', 'websiteone'])        || 'Website_one';
     const websiteTwoCol  = find(['website_two', 'website two', 'websitetwo'])        || 'Website_two';
+    const sourceCol      = find(['source'])                                           || 'Source';
 
     // ── Collect rows by category ─────────────────────────────────────────────
     const catchAllIndices = [];
@@ -357,7 +358,7 @@ export async function startCatchAllCleaner(jobId) {
     });
 
     const ctx = {
-      emailCol, firstNameCol, lastNameCol, statusCol, notesCol,
+      emailCol, firstNameCol, lastNameCol, statusCol, notesCol, sourceCol,
       domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol,
       log, state, failedComboDomains,
     };
@@ -495,17 +496,18 @@ export async function startCatchAllCleaner(jobId) {
 
 function resolveDomain(row, domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol) {
   // Priority: Domain Used → Website → Website_one → Website_two
+  // Returns { domain, source } — source is 'main' or 'waterfall'
   const candidates = [
-    row[domainUsedCol],
-    row[websiteCol],
-    row[websiteOneCol],
-    row[websiteTwoCol],
+    { raw: row[domainUsedCol], source: '' },        // Domain Used column has no fixed source — skip it for source
+    { raw: row[websiteCol],    source: 'main' },
+    { raw: row[websiteOneCol], source: 'waterfall' },
+    { raw: row[websiteTwoCol], source: 'waterfall' },
   ];
-  for (const raw of candidates) {
+  for (const { raw, source } of candidates) {
     const d = (raw || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/.*$/, '');
-    if (d) return d;
+    if (d) return { domain: d, source: source || 'main' };
   }
-  return '';
+  return { domain: '', source: '' };
 }
 
 // ── Single row processor: CATCH_ALL (existing logic) ────────────────────────
@@ -622,7 +624,7 @@ async function processCatchAllRow(rows, rowIdx, ctx) {
 
 async function processErrorRow(rows, rowIdx, ctx) {
   const {
-    emailCol, firstNameCol, lastNameCol, statusCol, notesCol,
+    emailCol, firstNameCol, lastNameCol, statusCol, notesCol, sourceCol,
     domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol,
     log, state, failedComboDomains,
   } = ctx;
@@ -633,7 +635,7 @@ async function processErrorRow(rows, rowIdx, ctx) {
 
   const firstName = (row[firstNameCol] || '').trim().toLowerCase().replace(/[^a-z]/g, '');
   const lastName  = (row[lastNameCol]  || '').trim().toLowerCase().replace(/[^a-z]/g, '');
-  const domain    = resolveDomain(row, domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol);
+  const { domain, source } = resolveDomain(row, domainUsedCol, websiteCol, websiteOneCol, websiteTwoCol);
 
   if (!firstName || !domain) {
     log(`[${rowIdx}] [${originalStatus}] Cannot build combo — missing firstName or domain`);
@@ -674,6 +676,7 @@ async function processErrorRow(rows, rowIdx, ctx) {
       if (result.result === 'deliverable') {
         row[emailCol]  = comboEmail;
         row[statusCol] = 'valid';
+        row[sourceCol] = source;
         row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → valid (combo: ${comboEmail})`;
         state.counts.errorFixed++;
         return;
@@ -682,6 +685,7 @@ async function processErrorRow(rows, rowIdx, ctx) {
       if (result.result === 'risky' || result.result === 'catch_all' || result.result === 'catchall') {
         row[emailCol]  = comboEmail;
         row[statusCol] = result.result === 'risky' ? 'risky' : 'catch_all';
+        row[sourceCol] = source;
         row[notesCol]  = `CatchAll Cleaner: ${originalStatus} → ${row[statusCol]} (combo: ${comboEmail})`;
         state.counts.errorRisky++;
         return;
