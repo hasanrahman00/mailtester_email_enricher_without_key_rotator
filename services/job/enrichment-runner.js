@@ -46,7 +46,7 @@ async function runEnrichment({ contacts, jobId, progress, meta, rowLookup, csv, 
     onResult: async (r) => {
       const row = rowLookup.get(r?.contact?.rowId);
       if (row) {
-        await csv.setRow(r.contact.rowId, composeCsvRowData(row.sanitizedRow, {
+        csv.setRow(r.contact.rowId, composeCsvRowData(row.sanitizedRow, {
           Email: r.bestEmail || '',
           Status: normalizeDeliveryStatus(r.status),
           Source: r.bestEmail ? resolveSource(r.domainUsed) : '',
@@ -56,7 +56,8 @@ async function runEnrichment({ contacts, jobId, progress, meta, rowLookup, csv, 
     },
   });
 
-  // Final flush — ensure last progress update is persisted
+  // Final flush — ensure all CSV rows and metadata are persisted
+  await csv.flushNow();
   if (metaTimer) { clearTimeout(metaTimer); metaTimer = null; }
   metaDirty = true;
   await flushMeta();

@@ -44,8 +44,9 @@ async function writeReportToRows(csvWriter) {
   for (let i = 0; i < entries.length && i < rows.length; i++) {
     rows[i][nameCol] = entries[i].name;
     rows[i][ratioCol] = entries[i].ratio;
-    await csvWriter.setRow(i, rows[i]);
+    csvWriter.setRow(i, rows[i]);
   }
+  await csvWriter.flushNow();
 }
 
 module.exports = { generateReport, writeReportToRows };
