@@ -106,8 +106,17 @@ async function runPriorityPool(states, { verifyEmail, concurrency, domainCache, 
         state.currentComboIndex++;
         if (state.currentComboIndex < state.patterns.length) {
           buckets[state.currentComboIndex].items.push(state);
+        } else {
+          // Exhausted all combos — mark as not_found immediately
+          state.bestEmail = null;
+          state.status = 'not_found';
+          state.details = { reason: 'All candidates rejected' };
+          state.done = true;
+          if (onResult) {
+            const payload = buildPayload(state);
+            ioQueue = ioQueue.then(() => onResult(payload)).catch(() => {});
+          }
         }
-        // If exhausted all patterns, finalizeContacts handles it
       }
     }
 
