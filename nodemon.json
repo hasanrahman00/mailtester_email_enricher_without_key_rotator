@@ -1,0 +1,6 @@
+{
+  "watch": ["server.js", "config", "api", "services", "utils", "clients", "public"],
+  "ext": "js,json,html,css",
+  "ignore": ["tempUploads", "node_modules", "*.csv", "*.tmp"],
+  "delay": "500"
+}

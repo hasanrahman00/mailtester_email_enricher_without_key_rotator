@@ -1,0 +1,11 @@
+services:
+  enricher:
+    container_name: enricher
+    build: .
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./tempUploads:/app/tempUploads

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Email Enricher</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-layout">
+      <!-- ── Sidebar ── -->
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          </div>
+          <div class="brand-text">
+            <span class="brand-name">Enricher</span>
+            <span class="brand-tag">Pro</span>
+          </div>
+        </div>
+        <nav class="sidebar-nav">
+          <a class="nav-item active" href="#">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+            Dashboard
+          </a>
+        </nav>
+        <div class="sidebar-footer">
+          <div id="api-status" class="api-badge" title="API key status">
+            <span class="api-dot"></span>
+            <span id="api-text">Checking...</span>
+          </div>
+          <span class="sidebar-version">v2.0</span>
+        </div>
+      </aside>
+
+      <!-- ── Main Content ── -->
+      <main class="main-content">
+        <!-- Top bar -->
+        <header class="topbar">
+          <div class="topbar-left">
+            <h1 class="page-title">Email Enrichment</h1>
+            <p class="page-subtitle">Upload contacts and find verified business emails</p>
+          </div>
+          <div class="topbar-right">
+            <button type="button" id="refresh-btn" class="btn btn-ghost">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              Refresh
+            </button>
+          </div>
+        </header>
+
+        <!-- Upload card -->
+        <section class="upload-card">
+          <div class="upload-card-header">
+            <div class="upload-card-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <div>
+              <h2 class="upload-card-title">Upload Contacts</h2>
+              <p class="upload-card-desc">CSV, XLS, or XLSX with name and domain columns</p>
+            </div>
+          </div>
+          <form id="upload-form">
+            <label class="dropzone" id="dropzone" for="file-input">
+              <input type="file" id="file-input" name="file" accept=".csv,.xls,.xlsx" required />
+              <div class="drop-inner">
+                <div class="drop-icon-ring">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </div>
+                <div class="drop-text">
+                  <p class="drop-title">Drop your file here or <span class="accent">browse</span></p>
+                  <p id="file-name" class="drop-meta">CSV / XLS / XLSX</p>
+                </div>
+              </div>
+            </label>
+            <div class="upload-actions">
+              <button type="submit" id="submit-btn" class="btn btn-primary btn-lg">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Run Enrichment
+              </button>
+              <div class="upload-meta-row">
+                <div class="chip-row">
+                  <span class="chip">First Name</span>
+                  <span class="chip">Last Name</span>
+                  <span class="chip">Website</span>
+                  <span class="chip dim">Website_one</span>
+                  <span class="chip dim">Website_two</span>
+                </div>
+              </div>
+            </div>
+          </form>
+          <div id="status-banner" class="banner" role="status"></div>
+        </section>
+
+        <!-- Jobs panel -->
+        <section class="jobs-panel">
+          <div class="panel-head">
+            <div class="panel-head-left">
+              <h2 class="panel-title">Jobs</h2>
+              <span class="panel-badge" id="jobs-count"></span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="jobs-table">
+              <thead>
+                <tr>
+                  <th class="col-name">File</th>
+                  <th class="col-status">Status</th>
+                  <th class="col-num">Rows</th>
+                  <th class="col-progress">Progress</th>
+                  <th class="col-num">Verified</th>
+                  <th class="col-num">Risky</th>
+                  <th class="col-num">Not Found</th>
+                  <th class="col-num">Other</th>
+                  <th class="col-num">Rate Lim.</th>
+                  <th class="col-actions">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="jobs-tbody"></tbody>
+            </table>
+          </div>
+          <p id="empty-state" class="empty">
+            <span class="empty-icon">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+            </span>
+            No jobs yet. Upload a file to start enriching.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <!-- Logs Drawer -->
+    <div id="logs-overlay" class="overlay" hidden>
+      <div class="drawer">
+        <div class="drawer-head">
+          <h3 id="logs-title">Job Logs</h3>
+          <button type="button" id="logs-close" class="drawer-close-btn">&times;</button>
+        </div>
+        <pre id="logs-content" class="logs-pre"></pre>
+      </div>
+    </div>
+
+    <!-- Issues Drawer -->
+    <div id="issues-overlay" class="overlay" hidden>
+      <div class="drawer">
+        <div class="drawer-head">
+          <h3 id="issues-title">Issue Statistics</h3>
+          <button type="button" id="issues-close" class="drawer-close-btn">&times;</button>
+        </div>
+        <div id="issues-content" class="issues-content"></div>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
